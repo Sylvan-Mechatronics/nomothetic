@@ -125,6 +125,40 @@ sudo rm -f /etc/rpi/swap.conf.d/80-rust-build.conf
 sudo reboot
 ```
 
+### 2.7 Install Docker (required for nomographic local DB service)
+
+`nomographic`'s local DB (`nomographic-local-db.service`, deployed via
+`nomographic/scripts/deploy-local.sh` / `make deploy-local`) runs ArcadeDB in
+a container. Debian trixie ships a current `docker.io` build in its own repos
+— no need for the upstream `get.docker.com` convenience script:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y docker.io
+```
+
+Add the deploy SSH user to the `docker` group so `nomographic`'s migration
+scripts (which run without `sudo`) can reach the daemon socket. Group
+membership only takes effect on a new login session, so reconnect (or
+`newgrp docker`) afterward:
+
+```bash
+sudo usermod -aG docker "$USER"
+# then start a fresh SSH session, or:
+newgrp docker
+```
+
+Verify:
+
+```bash
+docker --version
+sudo systemctl is-active docker
+docker run --rm hello-world
+```
+
+If you skip the group step, `deploy-local.sh`'s migration step fails with
+`permission denied while trying to connect to the Docker daemon socket`.
+
 ---
 
 ## 3 - Prepare Runtime Users, Groups, and Paths
@@ -385,6 +419,47 @@ curl -s http://192.168.4.1:8080/api/device/auth/status
 | `http://192.168.4.1:8080` unreachable | AP API service down or AP interface not up | `sudo systemctl status nomothetic-ap` and `ip addr show wlan0` |
 | Re-pair required after reboot | JWT signer not persisted | Validate `/var/lib/nomon/device_jwt_secret` presence and mode |
 | Commands return hardware errors | HAT/I2C unavailable | `sudo i2cdetect -y 1` should include `0x14` |
+| Pi becomes slow/unresponsive (high ping latency, SSH timeouts) while `nomographic-local-db` or its migrator container runs | Memory/swap thrashing — the Pi Zero 2W has ~415 MiB usable RAM, and an ArcadeDB JVM (`-Xmx384m` by default) can exhaust it alone, let alone two running at once | Check `free -h` for high swap usage; see §10.1 to add persistent swap. Also confirm `nomographic`'s `LOCAL_MIGRATOR_USE_RUNNING_SERVICE=1` path is actually taking effect during deploy (a stray temporary migrator container running alongside the persistent service is the usual second-JVM cause) |
+
+### 10.1 Add persistent swap (memory pressure under ArcadeDB / low-memory services)
+
+The temporary 8 GiB build swap in §2.3 is meant to be removed after compiling
+(§2.6) — it's oversized for always-on use and not intended to persist. For
+ongoing memory pressure from long-running services (e.g. `nomographic-local-db`),
+add a smaller **persistent** swapfile using the same mechanism:
+
+```bash
+sudo mkdir -p /etc/rpi/swap.conf.d/
+
+sudo tee /etc/rpi/swap.conf.d/50-persistent.conf > /dev/null <<'EOF'
+[Main]
+Mechanism=swapfile
+
+[File]
+FixedSizeMiB=1024
+EOF
+
+sudo reboot && exit
+```
+
+After reboot, confirm it's active:
+
+```bash
+free -h
+swapon --show
+```
+
+Notes:
+
+- Pick a filename that sorts before `80-rust-build.conf` (e.g. `50-`) so the
+  persistent config isn't accidentally deleted by the §2.6 cleanup step,
+  which only removes `80-rust-build.conf`.
+- 1024 MiB is a starting point for easing swap thrashing on a 415 MiB-RAM Pi
+  Zero 2W; adjust `FixedSizeMiB` based on observed pressure in `free -h`.
+- The microSD card has limited write endurance — persistent swap trades some
+  card lifespan for stability. This does not replace fixing an underlying
+  cause (e.g. two ArcadeDB containers running concurrently); use it alongside
+  the root-cause fix, not instead of it.
 
 ---
 
