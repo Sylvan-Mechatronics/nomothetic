@@ -140,8 +140,13 @@ for _arg in "$@"; do
     esac
 done
 
-VERSION="${_positional_args[0]:-}"
-PI_HOST="${_positional_args[1]:-${NOMON_PI_HOST:-}}"
+if [[ "${DEPLOY_LOCAL}" == true ]]; then
+    VERSION=""
+    PI_HOST="${_positional_args[0]:-${NOMON_PI_HOST:-}}"
+else
+    VERSION="${_positional_args[0]:-}"
+    PI_HOST="${_positional_args[1]:-${NOMON_PI_HOST:-}}"
+fi
 
 if [[ -n "${VERSION}" && ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "Error: version must start with 'v' followed by semver (e.g. v0.2.0)" >&2
