@@ -93,7 +93,7 @@ Mechanism=swapfile
 FixedSizeMiB=8192
 EOF
 
-sudo reboot
+sudo reboot && exit
 ```
 
 After reboot:
@@ -114,6 +114,7 @@ rustc --version
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
 uv --version
 ```
 
@@ -123,7 +124,7 @@ If you are done compiling on the Pi:
 
 ```bash
 sudo rm -f /etc/rpi/swap.conf.d/80-rust-build.conf
-sudo reboot
+sudo reboot && exit
 ```
 
 ### 2.7 Install Docker (required for nomographic local DB service)
@@ -212,6 +213,9 @@ cd ~/perceptua-nomon/nomopractic
 make deploy-local
 
 cd ~/perceptua-nomon/nomothetic
+make deploy-local
+
+cd ~/perceptua-nomon/autonomon
 make deploy-local
 ```
 
