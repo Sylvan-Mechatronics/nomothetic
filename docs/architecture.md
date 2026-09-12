@@ -241,14 +241,16 @@ The primary remote control interface. Mobile app and management server talk to t
 | `GET` | `/api/stream/status` | Stream | Current stream server state |
 | `POST` | `/api/audio/record/start` | Audio | Start USB mic recording |
 | `POST` | `/api/audio/record/stop` | Audio | Stop USB mic recording |
-| `POST` | `/api/audio/play` | Audio | Play WAV over HifiBerry DAC |
+| `POST` | `/api/audio/play` | Audio | Play WAV over the USB codec speaker output |
 | `POST` | `/api/audio/play/stop` | Audio | Stop audio playback |
 | `GET` | `/api/audio/files` | Audio | List available WAV files |
 | `GET` | `/api/audio/status` | Audio | Current recorder/player state |
 | `GET` | `/api/audio/volume` | Audio | Read current output volume (0–100) |
-| `POST` | `/api/audio/volume` | Audio | Set output volume (HifiBerry DAC) |
+| `POST` | `/api/audio/volume` | Audio | Set output volume (ALSA mixer) |
 | `GET` | `/api/audio/mic-gain` | Audio | Read current mic capture gain (0–100) |
 | `POST` | `/api/audio/mic-gain` | Audio | Set mic capture gain (USB mic PCM2902) |
+| `GET` | `/api/voice/wake` | Voice | Wake-word listener status (ADR-021) |
+| `PUT` | `/api/voice/wake` | Voice | Enable/disable wake listener, update phrase |
 | `GET` | `/api/sensor/grayscale/normalized` | Sensor | Normalised grayscale sensor readings (0.0–1.0) |
 | `GET` | `/api/calibration` | Calibration | Full calibration snapshot |
 | `PUT` | `/api/calibration/motor/{channel}` | Calibration | Set motor calibration (speed_scale, deadband, reversed) |
@@ -338,22 +340,30 @@ The IPC client for the `nomopractic` Rust daemon. See
 
 ### `nomothetic.audio` — `AudioRecorder` / `AudioPlayer`
 
-Handles USB microphone recording and HifiBerry DAC playback. Speaker amplifier
+Handles USB codec recording and playback. Speaker amplifier
 enable/disable is delegated to `HatClient` (nomopractic BCM 20 GPIO).
 
 **Hardware:**
-- **Microphone**: USB PnP Sound Device (Texas Instruments PCM2902), ALSA card 2
-- **Speaker output**: HifiBerry DAC (ALSA card 1, `sndrpihifiberry`)
+- **Microphone**: USB PnP Sound Device (Texas Instruments PCM2902), ALSA card 1
+- **Speaker output**: the same USB PCM2902 codec (ALSA card 1) — the only other
+  sound card on the robot is the playback-only HDMI output (`vc4hdmi`, ALSA
+  card 0); there is no HifiBerry DAC despite earlier docs
 - **Speaker amplifier enable**: BCM 20 (`spk_en` on Robot HAT V4), controlled
   via `nomopractic` IPC (`enable_speaker` / `disable_speaker`)
 
 **Responsibilities:**
-- `AudioRecorder.start()`: opens PyAudio input stream on ALSA card 2, records in
-  background thread, closes and writes WAV on `stop()`
-- `AudioPlayer.play()`: opens PyAudio output stream on default device (HifiBerry
-  DAC), plays WAV chunks in background thread
+- `AudioRecorder.start()`: resolves the mic by PortAudio device *name*
+  (`NOMON_AUDIO_INPUT_NAME`, default match `"usb"`; `NOMON_AUDIO_INPUT_INDEX`
+  as explicit override), records in a background thread, closes and writes WAV
+  on `stop()`
+- `AudioPlayer.play()`: opens PyAudio output stream on the name-resolved USB
+  codec output (`NOMON_AUDIO_OUTPUT_NAME`/`NOMON_AUDIO_OUTPUT_INDEX`), plays
+  WAV chunks in background thread
 - `list_audio_files()`: lists `*.wav` files in the configured audio directory
 - Graceful degradation: `RuntimeError` raised when `pyaudio` is not installed
+- Devices are resolved by name, never a blind numeric default: PortAudio
+  indexes are not ALSA card numbers, and opening the wrong capture device
+  segfaulted libportaudio on the Pi (killing the whole API process)
 
 **Key design decisions:**
 - Camera stays in `nomothetic` (complex libcamera Python interface, no HAT GPIO)
@@ -364,6 +374,68 @@ enable/disable is delegated to `HatClient` (nomopractic BCM 20 GPIO).
 - `threading.Event` stop signal; thread joins with 3 s timeout
 
 **Optional dependency:** `pyaudio>=0.2.14` in `[audio]` extra group
+
+---
+
+### `nomothetic.wake` — `WakeWordListener` (ADR-021)
+
+Hands-free AI voice commands: a daemon thread streams the USB microphone into
+a grammar-constrained Vosk recognizer (catch phrase from `NOMON_WAKE_PHRASE`),
+chimes on wake, captures the spoken command with the full-vocabulary
+recognizer, and dispatches it to the same `AiCommandService` the app's chat
+bar uses — then keeps a follow-up window open so the operator can continue the
+conversation without re-waking.
+
+**Responsibilities:**
+- Wake detection: RMS-gated streaming decode against `[phrase, variants, "[unk]"]`
+- Utterance capture: Vosk endpointing + no-speech timeout + hard utterance cap
+- Dispatch: `asyncio.run_coroutine_threadsafe` onto the app loop →
+  `AiCommandService.run_command` (history capped at 20 turns)
+- Feedback: synthesized wake/processing/success/error chimes
+  (`media/audio/chimes/`), amp enable/volume/disable via `HatClient` around
+  each clip; the processing blip plays once the utterance is captured, while
+  the transcript is finalised and the AI command runs
+- Spoken echo: with a `TtsEngine` wired, the heard transcript is spoken back
+  on a side thread *concurrently with the AI dispatch* (`_speak_async` →
+  synthesize → shared `_play_wave`), covering the silent gap without adding to
+  it; missing espeak-ng/ffmpeg falls back to the processing chime alone
+- Contention: mic stream closed during chimes, the spoken echo, and AI
+  execution; `pause()`/`resume()` hooks called by the `/api/audio/record`
+  endpoints
+- Runtime control: `GET/PUT /api/voice/wake` (`nomothetic.wake_routes`)
+
+**Key design decisions:**
+- Shares the one lazily-loaded Vosk model via `VoskSttEngine.create_recognizer()`
+  (512 MB Pi Zero 2W — never two model copies)
+- Operator command path only — no cognition (ADR-004), autonomon uninvolved
+- Construction is side-effect free; missing pyaudio/vosk/model/phrase leaves
+  the listener off without affecting the API
+
+**Optional dependencies:** `[audio]` (pyaudio) + `[stt]` (vosk) extras
+
+---
+
+### `nomothetic.tts` — `EspeakTtsEngine` (ADR-021)
+
+Offline speech synthesis for the wake-word listener's spoken transcript echo.
+Pluggable behind the `TtsEngine` protocol (mirrors `nomothetic.stt`), swapped
+in `create_app()` without touching the listener.
+
+**Responsibilities:**
+- `synthesize(text) -> bytes`: shell out to `espeak-ng --stdout` (text passed
+  as one argv element — no shell, no injection), then normalise via an ffmpeg
+  subprocess to 44.1 kHz mono 16-bit WAV so it plays through the listener's
+  chime output path with no sample-rate mismatch on the USB codec
+- Config: `NOMON_TTS_VOICE` (default `en`), `NOMON_TTS_RATE_WPM` (default 160)
+
+**Key design decisions:**
+- espeak-ng is a formant synthesiser — faster than real time on the Pi Zero
+  2W, so a short phrase genuinely overlaps the network-bound AI dispatch
+- No model to load (unlike Vosk); each call is two short subprocesses
+- Missing `espeak-ng`/`ffmpeg` → `TtsUnavailableError`, which the listener
+  treats as "no spoken echo" (the processing chime still plays), never an error
+
+**System prerequisites:** `espeak-ng` + `ffmpeg` (apt; installed by deploy.sh)
 
 ---
 
@@ -560,6 +632,7 @@ nomothetic/              ← Python monorepo (this repo)
   nomothetic.telemetry
   nomothetic.hat          ← IPC client for nomopractic (Phase 5)
   nomothetic.audio        ← USB mic recording + DAC playback (Phase 8)
+  nomothetic.wake         ← Wake-word AI voice commands (Phase 29, ADR-021)
   nomothetic.auth         ← JWT auth service (Phase 13, central mode)
   nomothetic.mode         ← Device/central mode selection (Phase 13)
   nomothetic.rate_limit   ← Sliding-window rate limiter (Phase 13)

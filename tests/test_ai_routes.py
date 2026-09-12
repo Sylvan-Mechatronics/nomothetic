@@ -1,9 +1,10 @@
 """Tests for the AI command HTTP endpoints (/api/ai/*).
 
-The routes are exercised with device auth disabled and a fake AiCommandService
-injected into ``app.state`` — asserting HTTP behaviour (status codes, payload
-mapping, key lifecycle, rate limiting) without any Anthropic traffic. The
-agentic loop itself is covered in test_ai_command.py.
+The routes are exercised with device auth disabled and fakes (AiCommandService,
+SttEngine) injected into ``app.state`` — asserting HTTP behaviour (status codes,
+payload mapping, key lifecycle, rate limiting) without any Anthropic traffic or
+speech model. The agentic loop itself is covered in test_ai_command.py and the
+Vosk engine in test_stt.py.
 """
 
 import os
@@ -15,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from nomothetic.ai_command import AiProviderAuthError, AiProviderError, AiUnavailableError
 from nomothetic.api import create_app
+from nomothetic.stt import SttResult, SttTranscriptionError, SttUnavailableError, VoskSttEngine
 
 TEST_KEY = "sk-ant-api03-test-key-0123456789"
 
@@ -37,6 +39,21 @@ class FakeAiService:
         if self.fail is not None:
             raise self.fail
         return dict(self.result)
+
+
+class FakeSttEngine:
+    """In-memory stand-in for an SttEngine used by the transcribe route tests."""
+
+    def __init__(self):
+        self.result = SttResult(text="drive forward", engine="fake")
+        self.fail: Exception | None = None
+        self.calls: list[tuple[bytes, str]] = []
+
+    def transcribe(self, audio, content_type):
+        self.calls.append((audio, content_type))
+        if self.fail is not None:
+            raise self.fail
+        return self.result
 
 
 @pytest.fixture
@@ -237,6 +254,102 @@ def test_command_rate_limited_429(client_service):
 
 
 # ============================================================================
+# Transcribe endpoint
+# ============================================================================
+
+
+def _audio_upload(data: bytes = b"m4a-bytes", content_type: str = "audio/mp4"):
+    return {"audio": ("clip.m4a", data, content_type)}
+
+
+@pytest.fixture
+def client_stt(client_service):
+    """TestClient with a FakeSttEngine injected on app.state."""
+    client, _, _ = client_service
+    engine = FakeSttEngine()
+    client.app.state.stt_engine = engine
+    return client, engine
+
+
+def test_transcribe_success(client_stt):
+    client, engine = client_stt
+    resp = client.post("/api/ai/transcribe", files=_audio_upload())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["text"] == "drive forward"
+    assert body["engine"] == "fake"
+    assert body["timestamp"]
+    audio, content_type = engine.calls[0]
+    assert audio == b"m4a-bytes"
+    assert content_type == "audio/mp4"
+
+
+def test_transcribe_silence_is_success_with_empty_text(client_stt):
+    client, engine = client_stt
+    engine.result = SttResult(text="", engine="fake")
+    resp = client.post("/api/ai/transcribe", files=_audio_upload())
+    assert resp.status_code == 200
+    assert resp.json()["text"] == ""
+
+
+def test_transcribe_unavailable_503(client_stt):
+    client, engine = client_stt
+    engine.fail = SttUnavailableError("STT model not installed at /var/lib/nomon/stt")
+    resp = client.post("/api/ai/transcribe", files=_audio_upload())
+    assert resp.status_code == 503
+    assert "model not installed" in resp.json()["error"]
+
+
+def test_transcribe_undecodable_422(client_stt):
+    client, engine = client_stt
+    engine.fail = SttTranscriptionError("could not decode audio")
+    resp = client.post("/api/ai/transcribe", files=_audio_upload(b"not-audio"))
+    assert resp.status_code == 422
+
+
+def test_transcribe_empty_upload_422(client_stt):
+    client, engine = client_stt
+    resp = client.post("/api/ai/transcribe", files=_audio_upload(b""))
+    assert resp.status_code == 422
+    assert engine.calls == []
+
+
+def test_transcribe_oversized_413(client_stt, monkeypatch):
+    client, engine = client_stt
+    monkeypatch.setenv("NOMON_STT_MAX_BYTES", "10")
+    resp = client.post("/api/ai/transcribe", files=_audio_upload(b"x" * 11))
+    assert resp.status_code == 413
+    assert engine.calls == []
+
+
+def test_transcribe_missing_field_422(client_stt):
+    client, _ = client_stt
+    assert client.post("/api/ai/transcribe").status_code == 422
+
+
+def test_transcribe_engine_not_configured_503(client_stt):
+    client, _ = client_stt
+    client.app.state.stt_engine = None
+    resp = client.post("/api/ai/transcribe", files=_audio_upload())
+    assert resp.status_code == 503
+    assert "not enabled" in resp.json()["error"]
+
+
+def test_transcribe_rate_limited_429(client_stt):
+    client, _ = client_stt
+    for _ in range(20):
+        assert client.post("/api/ai/transcribe", files=_audio_upload()).status_code == 200
+    assert client.post("/api/ai/transcribe", files=_audio_upload()).status_code == 429
+
+
+def test_create_app_wires_vosk_engine_by_default(client_service):
+    client, _, _ = client_service
+    # The fixture app is created before the fake is injected elsewhere; the
+    # default engine create_app wires must be the swappable Vosk implementation.
+    assert isinstance(client.app.state.stt_engine, VoskSttEngine)
+
+
+# ============================================================================
 # Auth inheritance
 # ============================================================================
 
@@ -255,4 +368,6 @@ def test_ai_endpoints_require_auth_when_enabled(tmp_path):
     client = TestClient(app)
     assert client.get("/api/ai/key").status_code == 401
     resp = client.post("/api/ai/command", json={"messages": [{"role": "user", "content": "x"}]})
+    assert resp.status_code == 401
+    resp = client.post("/api/ai/transcribe", files={"audio": ("clip.m4a", b"x", "audio/mp4")})
     assert resp.status_code == 401

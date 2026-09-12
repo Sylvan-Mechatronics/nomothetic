@@ -1,16 +1,20 @@
 """Audio recording and playback for the nomon fleet.
 
-Uses the USB microphone (C-Media/PCM2902, ALSA card 2 on PicarX) for
-recording and the HifiBerry DAC (ALSA card 1) for playback.  The speaker
-amplifier is enabled via the nomopractic HAT daemon before playback and
-disabled after.
+Both capture and playback go through the USB audio codec (Texas Instruments
+PCM2902, ALSA card 1 on the robot); the only other sound card is the
+playback-only HDMI output (``vc4hdmi``, ALSA card 0).  Devices are resolved
+by PortAudio device *name* (default match ``"usb"``) — PortAudio indexes are
+not ALSA card numbers, and opening a blind numeric index can segfault
+libportaudio outright (observed on the Pi, killing the whole API process).
+The speaker amplifier is enabled via the nomopractic HAT daemon before
+playback and disabled after.
 
 Classes
 -------
 AudioRecorder
     Records audio from the USB microphone to WAV files.
 AudioPlayer
-    Plays back audio files over the HifiBerry DAC.
+    Plays back audio files over the USB codec speaker output.
 AudioStatus
     Dataclass snapshot of current recorder/player state.
 """
@@ -24,6 +28,7 @@ import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 try:
     import pyaudio  # type: ignore[import-untyped]
@@ -43,8 +48,9 @@ DEFAULT_AUDIO_DIR: str = str(
     Path(os.environ.get("NOMON_MEDIA_DIR", "~/perceptua-nomon/media")).expanduser() / "audio"
 )
 
-#: ALSA card index for the USB microphone (PCM2902 on PicarX).
-DEFAULT_INPUT_DEVICE_INDEX: int = int(os.environ.get("NOMON_AUDIO_INPUT_INDEX", "2"))
+#: Default name fragment used to auto-detect audio devices (the robot's mic
+#: and speaker share a USB PCM2902 codec).  Case-insensitive.
+DEFAULT_DEVICE_NAME_MATCH: str = "usb"
 
 #: Recording sample rate (Hz).
 RECORD_RATE: int = 44100
@@ -56,6 +62,128 @@ RECORD_CHANNELS: int = 1
 RECORD_FORMAT_NAME: str = "paInt16"
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Device resolution
+# ---------------------------------------------------------------------------
+
+
+def env_device_index(env_var: str) -> int | None:
+    """Explicit PortAudio device index override from *env_var*.
+
+    This is a **PortAudio** device index, not an ALSA card number — the two
+    numbering schemes differ, and opening a blind numeric default is exactly
+    what segfaulted libportaudio on the Pi (ALSA's virtual ``default`` device
+    advertises capture it cannot deliver).  Unset means auto-detect by name.
+
+    Parameters
+    ----------
+    env_var : str
+        Name of the environment variable to read.
+
+    Returns
+    -------
+    int | None
+        The parsed index, or None when unset or not an integer.
+    """
+    raw = os.environ.get(env_var, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("%s=%r is not an integer; auto-detecting by name", env_var, raw)
+        return None
+
+
+def _resolve_device(
+    pa: Any, direction: str, name_match: str, explicit_index: int | None
+) -> int | None:
+    """Pick a PortAudio device: explicit override, name match, system default.
+
+    Never falls back to a blind numeric index: PortAudio indexes are not
+    ALSA card numbers, and opening the wrong device can segfault
+    libportaudio outright (observed on the Pi with ALSA's virtual
+    ``default``, which advertises capture backed by a playback-only card).
+    Real hardware is matched by name instead.
+    """
+    if explicit_index is not None:
+        return explicit_index  # operator override wins
+    channels_key = "maxInputChannels" if direction == "input" else "maxOutputChannels"
+    try:
+        for index in range(pa.get_device_count()):
+            info = pa.get_device_info_by_index(index)
+            name = str(info.get("name", ""))
+            if int(info.get(channels_key, 0)) > 0 and name_match in name.lower():
+                logger.info('audio %s device %d ("%s")', direction, index, name)
+                return index
+        if direction == "input":
+            info = pa.get_default_input_device_info()
+        else:
+            info = pa.get_default_output_device_info()
+        index = int(info["index"])
+        logger.info(
+            'audio %s device %d (system default, "%s") — no name match for "%s"',
+            direction,
+            index,
+            info.get("name", ""),
+            name_match,
+        )
+        return index
+    except Exception as e:  # noqa: BLE001 - no usable devices at all
+        logger.warning("no usable audio %s device: %s", direction, e)
+        return None
+
+
+def resolve_input_device(
+    pa: Any,
+    name_match: str = DEFAULT_DEVICE_NAME_MATCH,
+    explicit_index: int | None = None,
+) -> int | None:
+    """Resolve the PortAudio capture device index.
+
+    Parameters
+    ----------
+    pa : Any
+        A live ``pyaudio.PyAudio`` instance.
+    name_match : str
+        Case-insensitive fragment matched against input device names.
+    explicit_index : int | None
+        Explicit operator override; returned as-is when not None.
+
+    Returns
+    -------
+    int | None
+        Device index of the first name-matched input device, else the system
+        default input device, else None when no input device is usable.
+    """
+    return _resolve_device(pa, "input", name_match, explicit_index)
+
+
+def resolve_output_device(
+    pa: Any,
+    name_match: str = DEFAULT_DEVICE_NAME_MATCH,
+    explicit_index: int | None = None,
+) -> int | None:
+    """Resolve the PortAudio playback device index.
+
+    Parameters
+    ----------
+    pa : Any
+        A live ``pyaudio.PyAudio`` instance.
+    name_match : str
+        Case-insensitive fragment matched against output device names.
+    explicit_index : int | None
+        Explicit operator override; returned as-is when not None.
+
+    Returns
+    -------
+    int | None
+        Device index of the first name-matched output device, else the system
+        default output device, else None when no output device is usable.
+    """
+    return _resolve_device(pa, "output", name_match, explicit_index)
 
 
 # ---------------------------------------------------------------------------
@@ -98,17 +226,31 @@ class AudioRecorder:
     audio_dir : str | Path | None
         Directory where recorded WAV files are saved.  Defaults to
         ``NOMON_MEDIA_DIR`` env var / ``~/perceptua-nomon/media/audio``.
-    input_device_index : int
-        PyAudio device index for the USB microphone.
+    input_device_index : int | None
+        Explicit **PortAudio** device index for the microphone; defaults from
+        ``NOMON_AUDIO_INPUT_INDEX``.  When None the capture device is
+        auto-detected: the first input device whose name contains
+        *input_name_match*, falling back to the system default input device.
+    input_name_match : str | None
+        Case-insensitive name fragment for auto-detection; defaults from
+        ``NOMON_AUDIO_INPUT_NAME``, then ``"usb"``.
     """
 
     def __init__(
         self,
         audio_dir: str | Path | None = None,
-        input_device_index: int = DEFAULT_INPUT_DEVICE_INDEX,
+        input_device_index: int | None = None,
+        input_name_match: str | None = None,
     ) -> None:
         self._audio_dir = Path(audio_dir or DEFAULT_AUDIO_DIR)
-        self._input_device_index = input_device_index
+        self._input_device_index = (
+            input_device_index
+            if input_device_index is not None
+            else env_device_index("NOMON_AUDIO_INPUT_INDEX")
+        )
+        if input_name_match is None:
+            input_name_match = os.environ.get("NOMON_AUDIO_INPUT_NAME", "")
+        self._input_name_match = input_name_match.strip().lower() or DEFAULT_DEVICE_NAME_MATCH
         self._lock = threading.Lock()
         self._recording = False
         self._current_file: str | None = None
@@ -208,12 +350,17 @@ class AudioRecorder:
         pa = pyaudio.PyAudio()
         frames: list[bytes] = []
         try:
+            device_index = resolve_input_device(
+                pa, self._input_name_match, self._input_device_index
+            )
+            if device_index is None:
+                raise OSError("no usable capture device found")
             stream = pa.open(
                 format=fmt,
                 channels=RECORD_CHANNELS,
                 rate=RECORD_RATE,
                 input=True,
-                input_device_index=self._input_device_index,
+                input_device_index=device_index,
                 frames_per_buffer=chunk,
             )
             while not self._stop_event.is_set():
@@ -249,7 +396,7 @@ class AudioRecorder:
 
 
 class AudioPlayer:
-    """Plays back WAV audio files via the HifiBerry DAC.
+    """Plays back WAV audio files via the USB codec speaker output.
 
     Parameters
     ----------
@@ -257,17 +404,31 @@ class AudioPlayer:
         Directory searched when a bare filename (no directory component) is
         given to :meth:`play`.
     output_device_index : int | None
-        PyAudio device index for the DAC output.  ``None`` uses the system
-        default output device.
+        Explicit **PortAudio** device index for the speaker output; defaults
+        from ``NOMON_AUDIO_OUTPUT_INDEX``.  When None the playback device is
+        auto-detected: the first output device whose name contains
+        *output_name_match*, falling back to the system default output device
+        (which on the Pi may be the inaudible HDMI output).
+    output_name_match : str | None
+        Case-insensitive name fragment for auto-detection; defaults from
+        ``NOMON_AUDIO_OUTPUT_NAME``, then ``"usb"``.
     """
 
     def __init__(
         self,
         audio_dir: str | Path | None = None,
         output_device_index: int | None = None,
+        output_name_match: str | None = None,
     ) -> None:
         self._audio_dir = Path(audio_dir or DEFAULT_AUDIO_DIR)
-        self._output_device_index = output_device_index
+        self._output_device_index = (
+            output_device_index
+            if output_device_index is not None
+            else env_device_index("NOMON_AUDIO_OUTPUT_INDEX")
+        )
+        if output_name_match is None:
+            output_name_match = os.environ.get("NOMON_AUDIO_OUTPUT_NAME", "")
+        self._output_name_match = output_name_match.strip().lower() or DEFAULT_DEVICE_NAME_MATCH
         self._lock = threading.Lock()
         self._playing = False
         self._current_file: str | None = None
@@ -350,13 +511,18 @@ class AudioPlayer:
         chunk = 1024
         pa = pyaudio.PyAudio()
         try:
+            # A None result (no output devices enumerable) falls through to
+            # PortAudio's own default: harmless for playback, unlike capture.
+            device_index = resolve_output_device(
+                pa, self._output_name_match, self._output_device_index
+            )
             with wave.open(path, "rb") as wf:
                 stream = pa.open(
                     format=pa.get_format_from_width(wf.getsampwidth()),
                     channels=wf.getnchannels(),
                     rate=wf.getframerate(),
                     output=True,
-                    output_device_index=self._output_device_index,
+                    output_device_index=device_index,
                 )
                 data = wf.readframes(chunk)
                 while data and not self._stop_event.is_set():

@@ -50,7 +50,15 @@ After first boot, connect via Raspberry Pi Connect remote shell.
 
 ## 2 - First-Boot Access and Build Tooling
 
-### 2.1 Configure SSH key access
+### 2.1 Optional: install and configure Tailscale
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+sudo tailscale set --operator="$USER"
+```
+
+### 2.2 Configure SSH key access
 
 On the Pi (replace placeholders):
 
@@ -65,13 +73,14 @@ chmod 600 /home/$PI_USER/.ssh/authorized_keys
 sudo chown -R $PI_USER:$PI_USER /home/$PI_USER/.ssh
 ```
 
-Then connect from your dev machine:
+Then remove any old SSH keys & connect from your dev machine:
 
 ```bash
+ssh-keygen -f '~/.ssh/known_hosts' -R '<pi_host>'
 ssh <pi_user>@<pi_host>
 ```
 
-### 2.2 Configure temporary swap for Rust builds (8 GiB)
+### 2.3 Configure temporary swap for Rust builds (8 GiB)
 
 ```bash
 sudo mkdir -p /etc/rpi/swap.conf.d/
@@ -91,14 +100,6 @@ After reboot:
 
 ```bash
 free -h
-```
-
-### 2.3 Optional: install and configure Tailscale
-
-```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
-sudo tailscale set --operator="$USER"
 ```
 
 ### 2.4 Install Rust
@@ -215,6 +216,85 @@ make deploy-local
 ```
 
 If your layout differs, use the equivalent repository paths.
+
+### 5.1 Optional: voice-command transcription (STT)
+
+`POST /api/ai/transcribe` recognises speech on-device so the app's command bar
+can take voice input. It needs ffmpeg and a local Vosk model; without them the
+endpoint returns 503 and everything else works normally.
+
+**`make deploy-local` handles both automatically** (Phase 29): it apt-installs
+ffmpeg/unzip alongside the other system packages, and installs the Vosk model
+`NOMON_STT_MODEL_PATH` points at (default small English) — removing any stale
+`vosk-model-*` trees first, so pointing the config at a different model and
+redeploying swaps it in one step. The manual equivalent, for standalone use:
+
+```bash
+sudo apt install -y ffmpeg unzip
+
+cd ~/perceptua-nomon/nomothetic
+make fetch-stt-model          # fetches the model NOMON_STT_MODEL_PATH names
+                              # (default: small English, ~40 MB)
+sudo systemctl restart nomothetic-api
+```
+
+The model loads lazily on the first transcription request (a few seconds, and
+a large slice of the Pi Zero 2W's RAM — see ADR-020). Verify with:
+
+```bash
+curl -sk -X POST https://localhost:8443/api/ai/transcribe \
+  -H "Authorization: Bearer <device-jwt>" \
+  -F "audio=@clip.wav"
+```
+
+### 5.2 Optional: wake-word voice commands ("hey nomon")
+
+The robot listens on its own USB mic for a catch phrase, chimes, captures the
+spoken command, and runs it through the AI relay (ADR-021). Prerequisites: the
+§5.1 STT setup (vosk + model), the `[audio]` extra (pyaudio — installed by the
+standard deploy), an Anthropic key (`PUT /api/ai/key` or `ANTHROPIC_API_KEY`),
+and the service user in the `audio` group (deploy.sh ≥ Phase 29 does this;
+older installs: `sudo usermod -aG audio nomon && sudo systemctl restart
+nomothetic-api`).
+
+While a command is dispatched the robot also **speaks the heard transcript
+back** through the speaker (concurrently with the AI call, filling the silent
+gap). This needs `espeak-ng` — apt-installed by the deploy alongside ffmpeg,
+manually `sudo apt install -y espeak-ng`. Without it the spoken echo is simply
+skipped; the processing chime still plays. Tune the voice/rate with
+`NOMON_TTS_VOICE` / `NOMON_TTS_RATE_WPM` (see `.env.device.example`).
+
+Enable it in `/etc/nomothetic/nomothetic.env` (or `.env.device` for the
+manual `start.sh` path). Values with spaces must be double-quoted — the file
+is bash-sourced during deploys as well as read by systemd:
+
+```bash
+NOMON_WAKE_PHRASE="hey nomon"
+NOMON_WAKE_PHRASE_VARIANTS="hey no man,hey no mon"
+```
+
+then `sudo systemctl restart nomothetic-api`. The journal shows
+`wake-word listener started (phrase="hey nomon", ...)` and the chime files
+appear under `media/audio/chimes/` (replace them to customise the sounds).
+
+**Tuning the phrase (important):** Vosk silently drops grammar words that are
+missing from its vocabulary — "nomon" is one — so the literal phrase may never
+match and the *variants* are what actually fire. Tune live without restarts:
+
+```bash
+# Status (state, phrase, variants):
+curl -sk https://localhost:8443/api/voice/wake -H "Authorization: Bearer <device-jwt>"
+
+# Try a different variant set (in-memory; persist winners in the env file):
+curl -sk -X PUT https://localhost:8443/api/voice/wake \
+  -H "Authorization: Bearer <device-jwt>" -H "Content-Type: application/json" \
+  -d '{"phrase": "hey nomon", "variants": ["hey no man", "hey no mon"], "enabled": true}'
+```
+
+Say the phrase, watch `journalctl -u nomothetic-api -f` for
+`wake phrase detected` / `wake command heard`, and adjust. A quiet room may
+also need a lower `NOMON_WAKE_RMS_THRESHOLD` (the silence gate) — set it to 0
+to rule the gate out while tuning.
 
 ---
 

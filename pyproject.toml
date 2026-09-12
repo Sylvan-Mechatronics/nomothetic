@@ -84,6 +84,9 @@ audio = [
 ai = [
     "anthropic>=0.69",
 ]
+stt = [
+    "vosk>=0.3.45",
+]
 
 [project.urls]
 Homepage = "https://github.com/Perceptua/nomothetic"

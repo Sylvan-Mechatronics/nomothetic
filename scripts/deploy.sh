@@ -199,6 +199,22 @@ copy_nomothetic_env() {
         | grep -vE '^\s*#' \
         | grep -vE '^\s*$')"
 
+    # The copied file is consumed by three parsers: bash `source` (this
+    # script's remote block), systemd EnvironmentFile, and start.sh. An
+    # unquoted value containing spaces breaks the bash one ("VAR=a b" runs
+    # the command `b`), so fail fast here — on the dev machine, before
+    # anything is deployed — with the offending lines.
+    local _bad_lines
+    _bad_lines="$(printf '%s\n' "${filtered}" \
+        | grep -nE "^[A-Za-z_][A-Za-z0-9_]*=[^\"'[:space:]][^\"']*[[:space:]]+[^[:space:]]" \
+        || true)"
+    if [[ -n "${_bad_lines}" ]]; then
+        echo "Error: .env.${_mode} contains unquoted values with spaces; double-quote them" >&2
+        echo "(VAR=\"a b\") — /etc/nomothetic/nomothetic.env is bash-sourced during deploy:" >&2
+        printf '%s\n' "${_bad_lines}" >&2
+        exit 1
+    fi
+
     # Autonomy routine start needs a plugin credential in the device env; warn
     # (non-fatal) if neither is set so the operator isn't surprised by a 503.
     if ! printf '%s\n' "${filtered}" \
@@ -318,7 +334,7 @@ if [[ "${DEPLOY_LOCAL}" == "true" ]]; then
     echo "==> Target: ${TARGET} (local source)"
 else
     echo "==> Fresh clone from origin..."
-    _github_repo="https://github.com/Perceptua-Nomon/nomothetic.git"
+    _github_repo="https://github.com/Sylvan-Mechatronics/nomothetic.git"
     _tmp_clone="$(mktemp -d)"
     git clone --quiet "${_github_repo}" "${_tmp_clone}/nomothetic"
 
@@ -445,6 +461,15 @@ else
     echo "WARNING: netdev group not found — nmcli wifi provisioning will not work without sudo"
 fi
 
+# Add nomon service user to audio group for /dev/snd — the wake-word listener
+# (ADR-021) and the /api/audio/* endpoints capture/play through ALSA devices.
+if getent group audio >/dev/null 2>&1; then
+    echo "==> Adding '${NOMON_SERVICE_USER}' to audio group…"
+    sudo usermod -aG audio "${NOMON_SERVICE_USER}"
+else
+    echo "WARNING: audio group not found — microphone capture and speaker playback will fail"
+fi
+
 # ── Persistent state directory ────────────────────────────────────────────────
 # /var/lib/nomon holds device state that MUST survive redeploys: the pairing
 # secret (also read by nomopractic as the Wi-Fi Soft AP passphrase) and the device
@@ -497,31 +522,67 @@ if [[ "${DEPLOY_LOCAL}" != "true" ]]; then
     git checkout --quiet "${TARGET}"
 fi
 
-# ── System build dependencies ─────────────────────────────────────────────────
-# Several Pi extras require native libraries at build time:
+# ── System dependencies ───────────────────────────────────────────────────────
+# Several Pi extras require native libraries at build time, and the voice
+# features need runtime tools:
 #   picamera2 → python-prctl  needs libcap-dev
 #   picamera2                 needs libcamera-dev, python3-libcamera
 #   pyaudio                   needs portaudio19-dev
+#   voice STT (ADR-020/021)   needs ffmpeg (decodes voice-clip uploads;
+#                             also resamples the TTS echo — ADR-021)
+#   wake-word TTS (ADR-021)   needs espeak-ng (speaks the heard transcript)
+#   fetch_stt_model.sh        needs unzip (unpacks the Vosk model below)
 
 _sys_pkgs=()
-for _pkg in libcap-dev libcamera-dev python3-libcamera portaudio19-dev; do
+for _pkg in libcap-dev libcamera-dev python3-libcamera portaudio19-dev ffmpeg espeak-ng unzip; do
     if ! dpkg-query -W --showformat='${Status}' "${_pkg}" 2>/dev/null \
             | grep -q "install ok installed"; then
         _sys_pkgs+=("${_pkg}")
     fi
 done
 if [[ ${#_sys_pkgs[@]} -gt 0 ]]; then
-    echo "==> Installing missing system build packages: ${_sys_pkgs[*]}..."
+    echo "==> Installing missing system packages: ${_sys_pkgs[*]}..."
     sudo apt-get install -y "${_sys_pkgs[@]}"
     echo "  System packages installed ✓"
 else
-    echo "==> System build packages already present ✓"
+    echo "==> System packages already present ✓"
 fi
 
 # ── Install dependencies ───────────────────────────────────────────────────────
 
 echo "==> Installing dependencies..."
 make install-pi
+
+# ── STT model (voice transcription + wake word, ADR-020/021) ──────────────────
+# Ensure the Vosk model the config points at is installed — the wake-word
+# listener loads it at service start, not lazily. NOMON_STT_MODEL_PATH comes
+# from /etc/nomothetic/nomothetic.env (sourced above); unset means the
+# nomothetic.stt default. When the configured model is missing, stale
+# vosk-model-* trees are removed first so the SD card never hosts two models.
+# fetch_stt_model.sh runs under sudo so it never needs to escalate itself
+# (the plain `sudo` in a child script would bypass the askpass wrapper).
+
+_stt_model_path="${NOMON_STT_MODEL_PATH:-/var/lib/nomon/stt/vosk-model-small-en-us-0.15}"
+_stt_dir="$(dirname "${_stt_model_path}")"
+if [[ -d "${_stt_model_path}" && -n "$(ls -A "${_stt_model_path}" 2>/dev/null)" ]]; then
+    echo "==> STT model present at ${_stt_model_path} ✓"
+elif [[ "$(basename "${_stt_model_path}")" != vosk-model-* ]]; then
+    echo "==> WARNING: NOMON_STT_MODEL_PATH (${_stt_model_path}) is missing and does not"
+    echo "    look like an official Vosk model directory (vosk-model-*) — install it manually."
+else
+    echo "==> STT model missing at ${_stt_model_path}; installing..."
+    if [[ -d "${_stt_dir}" ]]; then
+        for _old_model in "${_stt_dir}"/vosk-model-*; do
+            [[ -e "${_old_model}" ]] || continue
+            echo "  Removing stale STT model: $(basename "${_old_model}")"
+            sudo rm -rf "${_old_model}"
+        done
+    fi
+    sudo env NOMON_STT_MODEL_PATH="${_stt_model_path}" \
+        NOMON_SERVICE_GROUP="${NOMON_SERVICE_GROUP}" \
+        ./scripts/fetch_stt_model.sh "${_stt_dir}"
+    echo "  STT model installed ✓"
+fi
 
 # ── Release checks ─────────────────────────────────────────────────────────────
 

@@ -3,22 +3,26 @@
 Mounted on the device router (so every endpoint inherits device JWT auth) with
 the ``/api/ai`` prefix:
 
-* ``GET    /api/ai/key``     — is a key configured, and from where (never the key).
-* ``PUT    /api/ai/key``     — store a user-supplied Anthropic API key (0600 file).
-* ``DELETE /api/ai/key``     — remove the stored key.
-* ``POST   /api/ai/command`` — run one chat command through the Claude tool loop.
+* ``GET    /api/ai/key``        — is a key configured, and from where (never the key).
+* ``PUT    /api/ai/key``        — store a user-supplied Anthropic API key (0600 file).
+* ``DELETE /api/ai/key``        — remove the stored key.
+* ``POST   /api/ai/command``    — run one chat command through the Claude tool loop.
+* ``POST   /api/ai/transcribe`` — transcribe one uploaded voice clip to text.
 
-The heavy lifting lives in :mod:`nomothetic.ai_command`; this module only maps
-HTTP shapes onto it.  The command endpoint is rate limited (``ai_limiter`` on
-``app.state``) because each call can fan out into several provider requests.
+The heavy lifting lives in :mod:`nomothetic.ai_command` and
+:mod:`nomothetic.stt`; this module only maps HTTP shapes onto them.  The
+command and transcribe endpoints are rate limited (``ai_limiter`` /
+``stt_limiter`` on ``app.state``) because commands fan out into several
+provider requests and transcription is CPU-heavy on the Pi.
 """
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field, model_validator
 
 from nomothetic.ai_command import (
@@ -30,9 +34,20 @@ from nomothetic.ai_command import (
     AiUnavailableError,
     validate_api_key_format,
 )
-from nomothetic.rate_limit import ai_rate_limit
+from nomothetic.rate_limit import ai_rate_limit, stt_rate_limit
+from nomothetic.stt import SttEngine, SttTranscriptionError, SttUnavailableError
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_MAX_AUDIO_BYTES = 2_000_000
+
+
+def _max_audio_bytes() -> int:
+    """Return the transcription upload cap in bytes (``NOMON_STT_MAX_BYTES``)."""
+    try:
+        return int(os.environ.get("NOMON_STT_MAX_BYTES", str(_DEFAULT_MAX_AUDIO_BYTES)))
+    except ValueError:
+        return _DEFAULT_MAX_AUDIO_BYTES
 
 
 def _now() -> str:
@@ -104,6 +119,14 @@ class AiKeyStatusResponse(BaseModel):
     timestamp: str
 
 
+class TranscribeResponse(BaseModel):
+    """The transcript of one uploaded voice clip (empty text means silence)."""
+
+    text: str
+    engine: str
+    timestamp: str
+
+
 # ---------------------------------------------------------------------------
 # Router factory
 # ---------------------------------------------------------------------------
@@ -140,6 +163,15 @@ def create_ai_router() -> APIRouter:
                 detail="AI command service not configured",
             )
         return service
+
+    def _stt_engine(request: Request) -> SttEngine:
+        engine: Optional[SttEngine] = getattr(request.app.state, "stt_engine", None)
+        if engine is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Voice transcription is not enabled on this device",
+            )
+        return engine
 
     def _key_status(store: AiKeyStore) -> AiKeyStatusResponse:
         source = store.source()
@@ -239,5 +271,52 @@ def create_ai_router() -> APIRouter:
             result["stop_reason"],
         )
         return AiCommandResponse(timestamp=_now(), **result)
+
+    @router.post(
+        "/transcribe",
+        response_model=TranscribeResponse,
+        dependencies=[Depends(stt_rate_limit)],
+    )
+    async def transcribe_audio(request: Request, audio: UploadFile = File(...)):
+        """Transcribe one uploaded voice clip to text.
+
+        Accepts any common container/codec (m4a, webm, wav, ...); the engine
+        normalises it on-device.  An empty ``text`` means the clip contained
+        no recognisable speech — that is a successful response, not an error.
+
+        Raises
+        ------
+        HTTPException
+            503 if transcription is not enabled or its prerequisites (vosk,
+            model, ffmpeg) are missing on the device,
+            413 if the upload exceeds ``NOMON_STT_MAX_BYTES``,
+            422 if the upload is empty or undecodable,
+            429 when rate limited.
+        """
+        engine = _stt_engine(request)
+        max_bytes = _max_audio_bytes()
+        data = await audio.read()
+        if len(data) > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=f"Audio upload exceeds the {max_bytes} byte limit",
+            )
+        if len(data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Audio upload is empty",
+            )
+        content_type = audio.content_type or "application/octet-stream"
+        try:
+            result = await asyncio.to_thread(engine.transcribe, data, content_type)
+        except SttUnavailableError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
+        except SttTranscriptionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+            ) from exc
+        return TranscribeResponse(text=result.text, engine=result.engine, timestamp=_now())
 
     return router

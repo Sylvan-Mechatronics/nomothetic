@@ -32,6 +32,7 @@
 | 25 | Fleet Telemetry History + Profile Editing | ✅ Complete |
 | 26 | AI Chat-Command Relay (device mode) | ✅ Complete |
 | 27 | Autonomy Telemetry Persistence (MQTT device→central) | ✅ Complete |
+| 28 | Voice Command Transcription (on-device STT) | ✅ Complete |
 
 **Test totals (current): 663 passing** (23 camera + 14 streaming + 168 API + 36 telemetry + 94 HAT + 19 audio + 18 auth + 29 central + 32 device-auth + 17 db + 41 pairing + 12 rate-limit + 6 mode + 15 network-provision + 13 token-store + 25 user-store + 22 fleet-store + 7 wifi-ap + 72 routine-launcher [10 catalogue + 17 control + 16 logs + 29 manager]; `ap_mode` tests removed — see ADR-016 amendment)
 
@@ -238,7 +239,7 @@ wire stream start/stop into the REST API.
 
 #### 8.2 — Audio Module (`nomothetic.audio`)
 - [x] New module `src/nomothetic/audio.py`
-- [x] `AudioRecorder`: records USB mic (PCM2902, ALSA card 2) to WAV
+- [x] `AudioRecorder`: records USB mic (PCM2902, ALSA card 1) to WAV
   - `start(filename=None) -> str`: starts background recording thread; returns output path
   - `stop() -> str | None`: signals thread, finalises WAV; returns path or None
   - Auto-generated timestamped filename when `filename` is absent
@@ -1696,6 +1697,114 @@ device-local `RoutineLogStore`.
 - [x] New tests: `test_autonomy_store.py`, `test_autonomy_forwarder.py`,
       autonomy cases in `test_telemetry_consumer.py` + `test_central.py`.
 - [x] `make check` clean (`ruff`/`black`/`mypy`; 824 tests).
+
+---
+
+### Phase 28 — Voice Command Transcription (on-device STT) ✅
+
+**Goal:** Give the app's AI command bar voice input (the deferred piece of
+nomotactic Phase 3). The Anthropic API accepts no audio, so the device
+transcribes locally: the app records a short clip, uploads it, and feeds the
+returned text to the existing `POST /api/ai/command` path. Like Phase 26 this
+is operator convenience, not autonomy — no cognition in nomothetic (ADR-004),
+and the robot's own microphone is not involved. See ADR-020.
+
+**Cross-repo dependencies:**
+- nomotactic Phase 3 follow-up consumes the endpoint (`CommandInput` mic →
+  `lib/voice.ts`).
+
+#### 28.1 — STT Engine (`nomothetic.stt`)
+- [x] `SttEngine` Protocol (`transcribe(audio, content_type) -> SttResult`) —
+      the pluggable seam for future models or cloud transcription services.
+- [x] `VoskSttEngine`: offline Vosk small-English model, **lazy-loaded** on
+      first request and **serialized** under the engine lock (512 MB Pi Zero
+      2W); model dir from `NOMON_STT_MODEL_PATH`.
+- [x] ffmpeg subprocess normalisation to 16 kHz mono PCM — accepts m4a/AAC
+      (mobile), webm/Opus (web), wav, anything ffmpeg demuxes.
+- [x] Missing vosk (`[stt]` extra), model, or ffmpeg → `SttUnavailableError`
+      (HTTP 503), never a crash; undecodable audio → `SttTranscriptionError`.
+
+#### 28.2 — Route (`nomothetic.ai_routes`)
+- [x] `POST /api/ai/transcribe` — multipart `audio` upload → `{ text, engine,
+      timestamp }`; empty text = silence (a success, not an error). Device JWT
+      auth inherited from the device router.
+- [x] 503 unavailable / 413 over `NOMON_STT_MAX_BYTES` (default 2 MB) /
+      422 empty or undecodable; `stt_limiter` (20/min/IP) separate from
+      `ai_limiter` so transcribe + command doesn't double-count.
+- [x] Engine injected on `app.state` in `create_app()` (same DI seam as the
+      AI service) — tests run against a fake engine.
+
+#### 28.3 — Deployment
+- [x] `scripts/fetch_stt_model.sh` + `make fetch-stt-model` — download/unpack
+      the Vosk small model to `/var/lib/nomon/stt`, group-readable by `nomon`.
+- [x] `docs/pi_setup.md` §5.1 (ffmpeg apt prerequisite, model fetch, verify
+      curl); `.env.device.example` STT section.
+
+#### Phase 28 Exit Criteria
+- [x] A recorded clip uploaded to `/api/ai/transcribe` returns its transcript;
+      the text drives the robot through the existing `/api/ai/command` loop.
+- [x] No model/ffmpeg/vosk on the device → 503 with an actionable message; all
+      other endpoints unaffected.
+- [x] New tests: `tests/test_stt.py` + transcribe cases in
+      `tests/test_ai_routes.py`; `make check` clean.
+
+---
+
+### Phase 29 — Wake-Word Voice Commands (on-robot) ✅
+
+**Goal:** Hands-free AI control: the robot listens on its own USB microphone
+for a configurable catch phrase ("hey nomon"), plays a chime, captures the
+spoken command, transcribes it with the *shared* Vosk model, and dispatches it
+to the same `AiCommandService` the app's chat bar uses — with a follow-up
+window so the operator can keep talking without re-waking. Extends ADR-020's
+"robot mic not involved" boundary for the operator command path only; still no
+cognition in nomothetic (ADR-004), autonomon uninvolved, nomopractic unchanged.
+See ADR-021.
+
+**Cross-repo dependencies:** none (nomopractic's `enable_speaker` /
+`disable_speaker` / `set_volume` / `set_mic_gain` IPC already existed).
+
+#### 29.1 — Listener (`nomothetic.wake`)
+- [x] `WakeWordListener` daemon thread: RMS-gated grammar decode →
+      wake chime → utterance capture (Vosk endpointing + timeouts) → dispatch
+      on the app loop → success/error chime → follow-up window (history capped
+      at 20 turns, reset on silence).
+- [x] `VoskSttEngine.create_recognizer()` — wake + command recognizers share
+      the one lazily-loaded model (512 MB Pi Zero 2W).
+- [x] Synthesized chimes (`media/audio/chimes/*.wav`, operator-replaceable);
+      amp enable/volume/disable via HAT IPC around each chime; mic stream
+      closed during chimes and AI execution (no self-hearing).
+- [x] Graceful degradation: missing pyaudio/vosk/model/phrase → listener off
+      with an actionable log; mic unplugged → backoff retry; capture-rate
+      probing (16 k → 48 k → 44.1 k) + pure-Python downsample to 16 kHz.
+
+#### 29.2 — Wiring, config & endpoints
+- [x] Constructed in `create_app()` (side-effect free), auto-started in the
+      lifespan when `NOMON_WAKE_PHRASE` is set; stopped on shutdown;
+      `/api/audio/record/*` pause/resume the listener (ALSA exclusivity).
+- [x] `GET/PUT /api/voice/wake` (`nomothetic.wake_routes`) — status + runtime
+      enable/disable/phrase/variant updates (in-memory; env is boot config).
+- [x] `NOMON_WAKE_*` env vars (`.env.device.example`), `[wakeword]` section in
+      `config.toml` emitted conditionally by `scripts/start.sh`.
+
+#### 29.3 — Deployment
+- [x] `nomothetic-api.service`: `SupplementaryGroups=audio`; deploy.sh adds
+      the service user to `audio` (/dev/snd for mic + DAC — a pre-existing gap
+      for the audio endpoints too).
+- [x] deploy.sh provisions the voice stack: ffmpeg + unzip join the apt
+      package check, and the Vosk model `NOMON_STT_MODEL_PATH` names is
+      installed when missing (stale `vosk-model-*` trees removed first);
+      `fetch_stt_model.sh` derives the model name from the configured path.
+- [x] `docs/pi_setup.md` §5.2 — prerequisites, enabling, and the
+      out-of-vocabulary variant tuning loop for the wake phrase.
+
+#### Phase 29 Exit Criteria
+- [x] Tests: `tests/test_wake.py` (state machine, chimes, gating, pause/stop)
+      + `tests/test_wake_routes.py` (endpoints, lifespan, record contention) +
+      `create_recognizer` cases in `tests/test_stt.py`; `make check` clean.
+- [ ] On-device: phrase → chime → spoken command → robot action → success
+      chime; follow-up command without re-waking; `/api/audio/record` works
+      while the listener is enabled. (Verify at next deploy.)
 
 ---
 

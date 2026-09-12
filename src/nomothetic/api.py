@@ -1015,7 +1015,7 @@ def _parse_int_env(name: str, default: int, lo: int = 0, hi: int = 100) -> int:
 
 # Default audio levels read from env vars (set by start.sh from config.toml).
 _default_volume_pct: int = _parse_int_env("NOMON_AUDIO_VOLUME", 80)
-_default_mic_gain_pct: int = _parse_int_env("NOMON_AUDIO_MIC_GAIN", 50)
+_default_mic_gain_pct: int = _parse_int_env("NOMON_AUDIO_MIC_GAIN", 80)
 _audio_player: Optional[AudioPlayer] = None
 _media_dir: Path = Path("~/perceptua-nomon/media").expanduser()
 
@@ -1102,9 +1102,27 @@ async def lifespan(app: FastAPI):
     # Resolve stream defaults from environment (set by start.sh from [stream] config)
     _stream_host = os.environ.get("NOM_STREAM_HOST", "0.0.0.0")
     _stream_port = int(os.environ.get("NOM_STREAM_PORT", "8000"))
+    # Resolve camera capture settings from environment (set by start.sh, or
+    # directly in .env.device, from [stream] config). Defaults match Camera's
+    # own hardcoded defaults, so an unconfigured deployment is unchanged.
+    _camera_index = int(os.environ.get("NOM_STREAM_CAMERA", "0"))
+    _camera_width = int(os.environ.get("NOM_STREAM_WIDTH", "1280"))
+    _camera_height = int(os.environ.get("NOM_STREAM_HEIGHT", "720"))
+    _camera_fps = int(os.environ.get("NOM_STREAM_FPS", "30"))
+    _camera_encoder = os.environ.get("NOM_STREAM_ENCODER", "h264")
+    if _camera_encoder not in ("h264", "mjpeg"):
+        logger.warning(
+            "NOM_STREAM_ENCODER=%r is not 'h264' or 'mjpeg'; using 'h264'", _camera_encoder
+        )
+        _camera_encoder = "h264"
     # Startup: Initialize camera
     try:
         _camera = Camera(
+            camera_index=_camera_index,
+            width=_camera_width,
+            height=_camera_height,
+            fps=_camera_fps,
+            encoder=_camera_encoder,
             directory=_media_dir / "videos",
             photo_directory=_media_dir / "photos",
         )
@@ -1136,6 +1154,18 @@ async def lifespan(app: FastAPI):
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to start autonomy event forwarder: %s", exc)
 
+    # Startup: on-robot wake-word listener (ADR-021). The event loop is
+    # attached unconditionally so /api/voice/wake can enable the listener at
+    # runtime; it auto-starts only when a wake phrase is configured.
+    wake_listener = getattr(app.state, "wake_listener", None)
+    if wake_listener is not None:
+        wake_listener.attach_loop(asyncio.get_running_loop())
+        if wake_listener.phrase:
+            try:
+                wake_listener.start_background()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to start wake-word listener: %s", exc)
+
     yield
 
     # Shutdown: stop telemetry consumer and autonomy forwarder
@@ -1145,6 +1175,12 @@ async def lifespan(app: FastAPI):
     autonomy_forwarder = getattr(app.state, "autonomy_forwarder", None)
     if autonomy_forwarder is not None:
         autonomy_forwarder.stop()
+
+    # Shutdown: stop the wake-word listener before tearing down audio so its
+    # thread cannot reopen the microphone mid-shutdown.
+    wake_listener = getattr(app.state, "wake_listener", None)
+    if wake_listener is not None:
+        wake_listener.stop()
 
     # Shutdown: stop any active audio sessions
     if _audio_recorder and _audio_recorder.is_recording:
@@ -1424,6 +1460,8 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
     from nomothetic.ai_routes import create_ai_router
     from nomothetic.rate_limit import RateLimiter as _AiRateLimiter
     from nomothetic.routine_catalog import autonomon_catalog
+    from nomothetic.stt import VoskSttEngine
+    from nomothetic.tts import EspeakTtsEngine
 
     app.state.ai_key_store = AiKeyStore()
     app.state.ai_service = AiCommandService(
@@ -1432,7 +1470,40 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         get_catalog=autonomon_catalog,
     )
     app.state.ai_limiter = _AiRateLimiter(max_requests=10, window_seconds=60)
+    # Voice commands: the app uploads a recorded clip, the device transcribes
+    # it locally (vosk small model, lazy-loaded on first use), and the text
+    # feeds the same /api/ai/command path the keyboard uses. The engine is
+    # swappable here without touching the route (see nomothetic.stt).
+    app.state.stt_engine = VoskSttEngine()
+    app.state.stt_limiter = _AiRateLimiter(max_requests=20, window_seconds=60)
+    # Spoken feedback: the wake-word listener echoes the heard transcript back
+    # over the speaker (espeak-ng), concurrently with the AI dispatch. Swappable
+    # here without touching the listener (see nomothetic.tts). Construction is
+    # side-effect free — espeak-ng/ffmpeg availability is checked lazily.
+    app.state.tts_engine = EspeakTtsEngine()
     device_router.include_router(create_ai_router())
+
+    # On-robot wake-word voice commands (ADR-021): the robot's own USB mic is
+    # watched for a catch phrase, and heard commands run through the same
+    # AiCommandService relay as the app's chat bar — still operator control,
+    # no cognition here, autonomon uninvolved. The listener is always
+    # constructed (construction is side-effect free, even without pyaudio/vosk)
+    # so /api/voice/wake can enable it at runtime; it auto-starts in the
+    # lifespan when NOMON_WAKE_PHRASE is set. Player/HAT/media dependencies
+    # are late-bound lambdas because those globals are created in the lifespan.
+    from nomothetic.wake import WakeWordListener
+    from nomothetic.wake_routes import create_wake_router
+
+    app.state.wake_listener = WakeWordListener(
+        stt_engine=app.state.stt_engine,
+        ai_service=app.state.ai_service,
+        ai_key_store=app.state.ai_key_store,
+        get_player=lambda: _audio_player,
+        get_hat=lambda: _hat_client,
+        get_chime_dir=lambda: _media_dir / "audio" / "chimes",
+        tts_engine=app.state.tts_engine,
+    )
+    device_router.include_router(create_wake_router())
 
     # ========================================================================
     # Device-mode endpoints (only registered when NOMON_API_MODE=device)
@@ -1915,18 +1986,32 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         if recorder.is_recording:
             raise HTTPException(status_code=409, detail="A recording is already in progress")
 
+        # Park the wake-word listener off the microphone for the recording
+        # session (ADR-021); /api/audio/record/stop hands it back.
+        wake_listener = getattr(app.state, "wake_listener", None)
+        if wake_listener is not None:
+            await asyncio.to_thread(wake_listener.pause)
+
         # Apply default mic capture gain before recording (best-effort).
         if _hat_client is not None:
             try:
                 await asyncio.to_thread(_hat_client.set_mic_gain, _default_mic_gain_pct)
-            except (HatError, HatConnectionError):
-                pass  # Continue without gain set if daemon unavailable.
+            except HatConnectionError:
+                pass  # Daemon unavailable; record without adjusting gain.
+            except HatError as e:
+                # A wrong/missing ALSA capture control leaves capture at a stale
+                # level — surface it (the daemon's message lists real controls).
+                logger.warning("mic gain not applied (%d%%): %s", _default_mic_gain_pct, e)
 
         try:
             recording_path = await asyncio.to_thread(recorder.start, request.filename)
         except ValueError as e:
+            if wake_listener is not None:
+                wake_listener.resume()
             raise HTTPException(status_code=400, detail=str(e)) from e
         except Exception as e:
+            if wake_listener is not None:
+                wake_listener.resume()
             raise HTTPException(status_code=500, detail=str(e)) from e
         return AudioRecordStartResponse(
             recording=True,
@@ -1950,6 +2035,11 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         """
         recorder = _require_audio_recorder()
         recording_path = await asyncio.to_thread(recorder.stop)
+        # Hand the microphone back to the wake-word listener (ADR-021). Safe
+        # even if it was never paused — resume is an idempotent event clear.
+        wake_listener = getattr(app.state, "wake_listener", None)
+        if wake_listener is not None:
+            wake_listener.resume()
         return AudioRecordStopResponse(
             recording=False,
             filename=Path(recording_path).name if recording_path else None,
@@ -1961,7 +2051,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         """Play a WAV audio file over the speaker.
 
         Enables the speaker amplifier via the nomopractic HAT daemon, then
-        starts playback of the specified WAV file through the HifiBerry DAC.
+        starts playback of the specified WAV file on the resolved output device.
 
         Parameters
         ----------
@@ -2079,7 +2169,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
 
     @device_router.post("/api/audio/volume", response_model=VolumeResponse, tags=["Audio"])
     async def set_volume(request: VolumeRequest):
-        """Set the output volume on the HifiBerry DAC via ALSA.
+        """Set the speaker output volume via the HAT daemon's ALSA mixer control.
 
         Parameters
         ----------
@@ -2105,7 +2195,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
 
     @device_router.get("/api/audio/volume", response_model=VolumeResponse, tags=["Audio"])
     async def get_volume():
-        """Read the current output volume from the ALSA HifiBerry DAC mixer.
+        """Read the current output volume from the HAT daemon's ALSA mixer control.
 
         Returns
         -------
@@ -2818,6 +2908,14 @@ def create_app() -> FastAPI:
     FastAPI
         Configured FastAPI application with CORS and mode-specific endpoints.
     """
+    # Under `uvicorn --factory` (the systemd unit) nothing configures the
+    # root logger, so the app's own INFO records — wake-word events (ADR-021),
+    # transcriptions, AI command outcomes — would be dropped and never reach
+    # the journal. Mirror the Server wrapper: attach a basic stderr handler
+    # only when nothing else has claimed the root logger.
+    if not logging.root.handlers:
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
     mode = get_mode()
 
     app = FastAPI(

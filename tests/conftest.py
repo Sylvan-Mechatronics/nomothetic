@@ -29,3 +29,18 @@ def _isolate_device_state_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("NOMON_AI_API_KEY_PATH", str(state_dir / "ai_api_key"))
     monkeypatch.setenv("NOMON_PLUGIN_KEY_DIR", str(state_dir / "plugin_keys"))
     monkeypatch.setenv("NOMON_ROUTINE_CATALOG_PATH", str(state_dir / "routine_catalog.json"))
+    # A configured wake phrase on the host (device deploys export it) would
+    # make every lifespan-running test spawn a real wake-word listener that
+    # grabs the USB microphone — keep the feature off unless a test opts in.
+    monkeypatch.delenv("NOMON_WAKE_PHRASE", raising=False)
+    monkeypatch.delenv("NOMON_WAKE_PHRASE_VARIANTS", raising=False)
+    monkeypatch.delenv("NOMON_WAKE_INPUT_INDEX", raising=False)
+    monkeypatch.delenv("NOMON_WAKE_INPUT_NAME", raising=False)
+    monkeypatch.delenv("NOMON_WAKE_OUTPUT_INDEX", raising=False)
+    monkeypatch.delenv("NOMON_WAKE_OUTPUT_NAME", raising=False)
+    # AudioRecorder/AudioPlayer read the same style of device overrides; host
+    # values (device deploys export them) must not leak into the test suite.
+    monkeypatch.delenv("NOMON_AUDIO_INPUT_INDEX", raising=False)
+    monkeypatch.delenv("NOMON_AUDIO_INPUT_NAME", raising=False)
+    monkeypatch.delenv("NOMON_AUDIO_OUTPUT_INDEX", raising=False)
+    monkeypatch.delenv("NOMON_AUDIO_OUTPUT_NAME", raising=False)

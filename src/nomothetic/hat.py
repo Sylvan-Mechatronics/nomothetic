@@ -735,7 +735,7 @@ class HatClient:
         self._request("disable_speaker", {})
 
     def set_volume(self, volume_pct: int) -> None:
-        """Set the output volume on the HifiBerry DAC via ALSA.
+        """Set the speaker output volume via the daemon's ALSA mixer control.
 
         Parameters
         ----------
