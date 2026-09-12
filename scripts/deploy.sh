@@ -334,7 +334,7 @@ if [[ "${DEPLOY_LOCAL}" == "true" ]]; then
     echo "==> Target: ${TARGET} (local source)"
 else
     echo "==> Fresh clone from origin..."
-    _github_repo="https://github.com/Perceptua-Nomon/nomothetic.git"
+    _github_repo="https://github.com/Sylvan-Mechatronics/nomothetic.git"
     _tmp_clone="$(mktemp -d)"
     git clone --quiet "${_github_repo}" "${_tmp_clone}/nomothetic"
 
