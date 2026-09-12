@@ -25,6 +25,7 @@ provision_tls_cert
 """
 
 import asyncio
+import hmac
 import importlib.metadata as _meta
 import json
 import logging
@@ -37,9 +38,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from nomothetic.mode import Mode, get_mode
@@ -385,6 +387,13 @@ class StreamStartResponse(BaseModel):
     token: Optional[str] = None
     """Access token the client must send as ``?token=`` on every request to
     the stream server (which runs outside the authenticated REST API)."""
+    live_path: Optional[str] = None
+    """Path (relative to this same HTTPS/TLS origin) that relays the MJPEG
+    stream over the authenticated REST API's TLS connection instead of the
+    stream server's own plain-HTTP host/port. Clients should join this with
+    the device base URL they already used to reach this endpoint — never
+    ``url``/``host``/``port`` directly, which describe the internal stream
+    server and may not be reachable or trusted from outside the device."""
     timestamp: str
 
 
@@ -926,7 +935,13 @@ def provision_tls_cert(cert_path: Path, key_path: Path) -> str:
                     ],
                     capture_output=True,
                     text=True,
-                    timeout=30,
+                    # When Funnel/HTTP-01 isn't available, `tailscale cert` falls
+                    # back to a DNS-01 challenge, which round-trips a SetDNS call
+                    # to Tailscale's control plane and can comfortably exceed 30s
+                    # (observed timing out ~28-30s in production, forcing a
+                    # self-signed fallback on every deploy). 90s gives that
+                    # round trip real headroom without hanging indefinitely.
+                    timeout=90,
                 )
                 if ts_cert.returncode == 0:
                     logger.info(
@@ -1724,6 +1739,9 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
                 host=_stream_server.host,
                 port=_stream_server.port,
                 token=_stream_token,
+                live_path=(
+                    f"/api/stream/live?token={_stream_token}" if _stream_token is not None else None
+                ),
                 timestamp=datetime.now(timezone.utc).isoformat(),
             )
 
@@ -1744,6 +1762,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
             host=host,
             port=port,
             token=token,
+            live_path=f"/api/stream/live?token={token}",
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
 
@@ -1791,6 +1810,55 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
             url=url,
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
+
+    @app.get("/api/stream/live", tags=["Stream"])
+    async def stream_live(token: str = ""):
+        """Relay the MJPEG stream over this endpoint's own TLS connection.
+
+        The stream server (``StreamServer``) binds a separate plain-HTTP
+        host/port and is reachable at ``127.0.0.1`` regardless of the
+        interface it was started on. This endpoint re-exposes those frames
+        on the same TLS-terminated origin the REST API already uses, so
+        clients never need a cleartext exception or a self-signed-cert
+        trust decision just to view the camera.
+
+        Registered on the bare ``app`` (not ``device_router``) — an
+        ``<img>``/WebView src cannot carry a JWT bearer header, so this
+        stays gated by the same per-run ``?token=`` issued by
+        ``/api/stream/start`` (checklist P10) instead.
+
+        Raises
+        ------
+        HTTPException
+            404 if no stream is running.
+            403 if the token is missing or invalid.
+            502 if the internal stream server can't be reached.
+        """
+        if _stream_server is None or _stream_token is None:
+            raise HTTPException(status_code=404, detail="Stream not running")
+        if not hmac.compare_digest(token, _stream_token):
+            raise HTTPException(status_code=403, detail="Invalid stream token")
+
+        upstream_url = f"http://127.0.0.1:{_stream_server.port}/stream?token={_stream_token}"
+        client = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=5.0))
+        try:
+            upstream = await client.send(client.build_request("GET", upstream_url), stream=True)
+        except httpx.HTTPError as e:
+            await client.aclose()
+            raise HTTPException(status_code=502, detail=f"Stream upstream unavailable: {e}") from e
+
+        async def relay():
+            try:
+                async for chunk in upstream.aiter_raw():
+                    yield chunk
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+
+        content_type = upstream.headers.get(
+            "content-type", "multipart/x-mixed-replace; boundary=frame"
+        )
+        return StreamingResponse(relay(), media_type=content_type)
 
     # ========================================================================
     # Camera Endpoints

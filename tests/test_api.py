@@ -1421,6 +1421,9 @@ def test_start_stream_success(client, mock_camera):
     # the per-run token and embed it in the ready-to-open URL.
     assert data["token"]
     assert f"token={data['token']}" in data["url"]
+    # live_path relays the stream over this same (trusted) TLS origin —
+    # clients should join it with the device base URL, not host/port/url.
+    assert data["live_path"] == f"/api/stream/live?token={data['token']}"
     mock_server.start_background.assert_called_once()
 
     # Cleanup
@@ -1441,11 +1444,13 @@ def test_start_stream_already_running(client, mock_camera):
 
     nomothetic.api._camera = mock_camera
     nomothetic.api._stream_server = mock_server
+    nomothetic.api._stream_token = "existing-token"
 
     response = client.post("/api/stream/start", json={})
     assert response.status_code == 200
     data = response.json()
     assert data["port"] == 8001
+    assert data["live_path"] == "/api/stream/live?token=existing-token"
 
     # Cleanup
     nomothetic.api._camera = None
@@ -1523,6 +1528,72 @@ def test_get_stream_status_not_running(client):
     data = response.json()
     assert data["running"] is False
     assert data["url"] is None
+
+
+def test_stream_live_not_running(client):
+    """GET /api/stream/live returns 404 when no stream is running."""
+    import nomothetic.api
+
+    nomothetic.api._stream_server = None
+    nomothetic.api._stream_token = None
+
+    response = client.get("/api/stream/live", params={"token": "anything"})
+    assert response.status_code == 404
+
+
+def test_stream_live_invalid_token(client):
+    """GET /api/stream/live returns 403 when the token doesn't match."""
+    from unittest.mock import MagicMock
+
+    import nomothetic.api
+
+    mock_server = MagicMock()
+    mock_server.port = 8000
+    nomothetic.api._stream_server = mock_server
+    nomothetic.api._stream_token = "correct-token"
+
+    response = client.get("/api/stream/live", params={"token": "wrong-token"})
+    assert response.status_code == 403
+
+    nomothetic.api._stream_server = None
+    nomothetic.api._stream_token = None
+
+
+def test_stream_live_relays_upstream(client):
+    """GET /api/stream/live relays bytes from the internal stream server."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import nomothetic.api
+
+    mock_server = MagicMock()
+    mock_server.port = 8000
+    nomothetic.api._stream_server = mock_server
+    nomothetic.api._stream_token = "good-token"
+
+    async def _aiter_raw():
+        yield b"--frame\r\n"
+        yield b"fake-jpeg-bytes"
+
+    mock_upstream = MagicMock()
+    mock_upstream.headers = {"content-type": "multipart/x-mixed-replace; boundary=frame"}
+    mock_upstream.aiter_raw = _aiter_raw
+    mock_upstream.aclose = AsyncMock()
+
+    mock_client = MagicMock()
+    mock_client.build_request = MagicMock(return_value="built-request")
+    mock_client.send = AsyncMock(return_value=mock_upstream)
+    mock_client.aclose = AsyncMock()
+
+    with patch("nomothetic.api.httpx.AsyncClient", return_value=mock_client):
+        response = client.get("/api/stream/live", params={"token": "good-token"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "multipart/x-mixed-replace; boundary=frame"
+    assert response.content == b"--frame\r\nfake-jpeg-bytes"
+    mock_client.send.assert_called_once()
+
+    nomothetic.api._stream_server = None
+    nomothetic.api._stream_token = None
 
 
 # ============================================================================
