@@ -669,9 +669,12 @@ playback completes to conserve power.
 
 ### `set_volume`
 
-Set the output volume on the HifiBerry DAC via the ALSA mixer (`amixer sset`).
+Set the speaker output volume via the ALSA mixer (`amixer sset`).
 The daemon maps `volume_pct` directly to the configured ALSA control
-(default: `"Digital"` on card 1).
+(default: `"Master"` on the card whose `/proc/asound/cards` entry matches
+`output_card_name`, default `"sndrpihifiberry"` — the Robot HAT I2S DAC,
+which only exists once `dtoverlay=hifiberry-dac` is enabled in the Pi boot
+config; no match falls back to the ALSA default card).
 
 **Request:**
 ```json
@@ -723,8 +726,14 @@ Read the current output volume from the ALSA mixer.
 ### `set_mic_gain`
 
 Set the USB microphone capture gain via the ALSA mixer (`amixer sset`).
-The daemon maps `gain_pct` to the configured input ALSA control
-(default: `"Mic Capture"` on card 2 — PCM2902 USB mic).
+The daemon applies `gain_pct` to each configured input ALSA control that
+exists on the card (default `input_controls = ["Mic", "Capture"]`; absent
+ones are skipped, since USB codecs vary in whether the ADC level is named
+`"Mic"` or `"Capture"`). The card is the one whose `/proc/asound/cards` entry
+matches `input_card_name` (default `"USB"` — the PCM2902 USB mic, card 1 on
+the robot; ALSA card numbers are never hardcoded because they depend on
+driver load order). If none of the configured controls exist, the call fails
+with an error listing the card's actual controls.
 
 **Request:**
 ```json

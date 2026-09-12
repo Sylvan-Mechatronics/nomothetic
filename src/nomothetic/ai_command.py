@@ -52,7 +52,7 @@ _DEFAULT_KEY_PATH = "/var/lib/nomon/ai_api_key"
 _MIN_STORED_KEY_LENGTH = 20
 _MAX_STORED_KEY_LENGTH = 200
 
-_DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+_DEFAULT_MODEL = "claude-sonnet-5"
 _DEFAULT_MAX_TOKENS = 2048
 _DEFAULT_MAX_TOOL_ITERATIONS = 8
 _REQUEST_TIMEOUT_S = 120.0
@@ -429,7 +429,7 @@ class AiCommandService:
         (``nomothetic.routine_catalog.autonomon_catalog``).
     model : str, optional
         Anthropic model ID.  Defaults to ``$NOMON_AI_MODEL`` or
-        ``claude-haiku-4-5-20251001``.
+        ``claude-sonnet-5``.
     max_tokens : int, optional
         Per-response token cap.  Defaults to ``$NOMON_AI_MAX_TOKENS`` or 2048.
     max_tool_iterations : int, optional

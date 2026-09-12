@@ -1,7 +1,7 @@
 VERSION ?=
 PI_HOST ?=
 
-.PHONY: install install-dev install-pi test lint format type-check check clean start-stream start-api start-api-central stop-stream stop-api stop deploy deploy-local deploy-central coverage
+.PHONY: install install-dev install-pi test lint format type-check check clean start-stream start-api start-api-central stop-stream stop-api stop deploy deploy-local deploy-central coverage fetch-stt-model
 
 install:
 	uv sync
@@ -63,6 +63,9 @@ deploy-local:
 deploy-central:
 	./scripts/deploy.sh --local --mode central $(PI_HOST)
 
+fetch-stt-model:
+	./scripts/fetch_stt_model.sh
+
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
@@ -83,6 +86,7 @@ help:
 	@echo "  deploy       - Deploy release to Raspberry Pi over SSH (VERSION=v0.x.y PI_HOST=user@host)"
 	@echo "  deploy-local     - Sync and deploy device mode to Pi (PI_HOST=user@host)"
 	@echo "  deploy-central   - Sync and deploy central mode to server (PI_HOST=user@host)"
+	@echo "  fetch-stt-model  - Download the Vosk voice-transcription model (run on the Pi)"
 	@echo "  clean        - Remove generated files and caches"
 	@echo "  start        - Start both the stream and API servers in the background"
 	@echo "  start-stream - Start the MJPEG stream server in the background"

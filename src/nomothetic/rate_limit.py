@@ -134,3 +134,16 @@ async def ai_rate_limit(request: Request) -> None:
     """
     limiter: RateLimiter = request.app.state.ai_limiter
     limiter.check(_client_ip(request))
+
+
+async def stt_rate_limit(request: Request) -> None:
+    """FastAPI dependency that enforces voice transcription rate limiting.
+
+    Reads the ``stt_limiter`` from ``app.state`` (created in ``create_app``).
+    Allows 20 requests per minute per IP address — separate from the AI
+    command limiter so a voice command (transcribe + command) does not
+    double-count against the chat budget, while still capping the CPU-heavy
+    on-device recognition.
+    """
+    limiter: RateLimiter = request.app.state.stt_limiter
+    limiter.check(_client_ip(request))

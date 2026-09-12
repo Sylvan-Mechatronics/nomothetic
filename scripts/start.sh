@@ -160,15 +160,20 @@ server_type = sys.argv[2]
 lg = cfg.get("logging", {})
 print("NOM_LOG_DIR=" + repr(str(lg.get("log_dir", "logs"))))
 
+# Camera capture settings apply to both server types: the standalone debug
+# stream server below, and the API server's own camera (POST
+# /api/stream/start reuses that same instance for still capture, recording,
+# and streaming) — there is only one physical camera to configure.
+s = cfg.get("stream", {})
+print("NOM_STREAM_CAMERA="  + str(int(s.get("camera_index", 0))))
+print("NOM_STREAM_WIDTH="   + str(int(s.get("width",        1280))))
+print("NOM_STREAM_HEIGHT="  + str(int(s.get("height",       720))))
+print("NOM_STREAM_FPS="     + str(int(s.get("fps",          30))))
+print("NOM_STREAM_ENCODER=" + repr(str(s.get("encoder",     "h264"))))
+
 if server_type == "stream":
-    s = cfg.get("stream", {})
-    print("NOM_STREAM_HOST="    + repr(str(s.get("host",        "0.0.0.0"))))
-    print("NOM_STREAM_PORT="    + str(int(s.get("port",         8000))))
-    print("NOM_STREAM_CAMERA="  + str(int(s.get("camera_index", 0))))
-    print("NOM_STREAM_WIDTH="   + str(int(s.get("width",        1280))))
-    print("NOM_STREAM_HEIGHT="  + str(int(s.get("height",       720))))
-    print("NOM_STREAM_FPS="     + str(int(s.get("fps",          30))))
-    print("NOM_STREAM_ENCODER=" + repr(str(s.get("encoder",     "h264"))))
+    print("NOM_STREAM_HOST=" + repr(str(s.get("host", "0.0.0.0"))))
+    print("NOM_STREAM_PORT=" + str(int(s.get("port",  8000))))
 else:
     a = cfg.get("api", {})
     h = cfg.get("hat", {})
@@ -183,9 +188,22 @@ else:
     print("NOM_API_CERT_DIR="         + repr(str(a.get("cert_dir",         ".certs"))))
     print("NOM_HAT_SOCKET="           + repr(str(h.get("socket_path",      ""))))
     print("NOMON_MEDIA_DIR="          + repr(str(md.get("dir",             "~/perceptua-nomon/media"))))
-    print("NOMON_AUDIO_INPUT_INDEX="  + str(int(au.get("input_device_index", 2))))
+    # Only emitted when config.toml sets an explicit index — the default is
+    # name-based auto-detection, and a blind numeric index can segfault
+    # libportaudio (PortAudio indexes are not ALSA card numbers).
+    if au.get("input_device_index") is not None:
+        print("NOMON_AUDIO_INPUT_INDEX=" + str(int(au["input_device_index"])))
     print("NOMON_AUDIO_VOLUME="       + str(int(au.get("default_volume_pct",   80))))
     print("NOMON_AUDIO_MIC_GAIN="     + str(int(au.get("default_mic_gain_pct", 50))))
+    # Wake-word vars are emitted only when config.toml sets a phrase, so an
+    # empty [wakeword] section never clobbers values loaded from .env.device.
+    wk = cfg.get("wakeword", {})
+    wake_phrase = str(wk.get("phrase", "")).strip()
+    if wake_phrase:
+        print("NOMON_WAKE_PHRASE="            + repr(wake_phrase))
+        print("NOMON_WAKE_PHRASE_VARIANTS="   + repr(str(wk.get("phrase_variants", ""))))
+        print("NOMON_WAKE_FOLLOWUP_WINDOW_S=" + str(float(wk.get("followup_window_s", 8.0))))
+        print("NOMON_WAKE_CHIME_VOLUME_PCT="  + str(int(wk.get("chime_volume_pct", 80))))
     print("NOMON_MQTT_BROKER="        + repr(str(mq.get("broker",          ""))))
     print("NOMON_MQTT_PORT="          + str(int(mq.get("port",             1883))))
     print("NOMON_MQTT_TOPIC="         + repr(str(mq.get("topic",           "nomon/telemetry"))))
@@ -232,8 +250,13 @@ else
   fi
   export NOM_API_MODE NOM_API_HOST NOM_API_PORT NOM_API_USE_SSL NOM_API_CERT_DIR NOMON_HAT_SOCKET_PATH
   export NOMON_MEDIA_DIR NOMON_AUDIO_INPUT_INDEX NOMON_AUDIO_VOLUME NOMON_AUDIO_MIC_GAIN
+  export NOM_STREAM_CAMERA NOM_STREAM_WIDTH NOM_STREAM_HEIGHT NOM_STREAM_FPS NOM_STREAM_ENCODER
   export NOMON_MQTT_BROKER NOMON_MQTT_PORT NOMON_MQTT_TOPIC NOMON_MQTT_INTERVAL
   export NOMON_DEVICE_ID
+  # Exporting unset names is a no-op — these only propagate when config.toml
+  # emitted them (see the wakeword block above) or .env.device set them.
+  export NOMON_WAKE_PHRASE NOMON_WAKE_PHRASE_VARIANTS
+  export NOMON_WAKE_FOLLOWUP_WINDOW_S NOMON_WAKE_CHIME_VOLUME_PCT
   export NOMON_API_MODE="${NOMON_API_MODE:-${NOM_API_MODE}}"
 
   if [[ "${NOMON_API_MODE}" == "central" ]]; then

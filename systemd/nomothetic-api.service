@@ -12,6 +12,10 @@ Type=simple
 # To override, set NOMON_SERVICE_USER / NOMON_SERVICE_GROUP in your local .env.
 User=${NOMON_SERVICE_USER}
 Group=${NOMON_SERVICE_GROUP}
+# /dev/snd access for the USB PCM2902 codec (mic + speaker): the wake-word
+# listener (ADR-021) and the /api/audio/* record/play endpoints open ALSA
+# devices through PyAudio.
+SupplementaryGroups=audio
 EnvironmentFile=-/etc/nomothetic/nomothetic.env
 
 # systemd creates /var/lib/nomon owned by User:Group automatically.

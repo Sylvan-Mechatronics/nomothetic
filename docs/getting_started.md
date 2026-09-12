@@ -72,13 +72,16 @@ Key settings in `config.toml`:
 | `[api]` | `use_ssl` | `true` | Auto-generates self-signed cert in `.certs/` |
 | `[hat]` | `socket_path` | `/run/nomopractic/nomopractic.sock` | IPC socket |
 | `[media]` | `dir` | `~/perceptua-nomon/media` | Base media directory for video and audio |
-| `[audio]` | `input_device_index` | `2` | ALSA mic device index |
+| `[audio]` | `input_device_index` | unset | Explicit PortAudio mic index (unset = auto-detect by name) |
 | `[mqtt]` | `broker` | `""` | MQTT broker address (leave empty to disable telemetry) |
 | `[telemetry]` | `device_id` | `""` | Fleet node ID (auto-detected if empty) |
 
 Audio recordings are stored under the directory configured by `[media].dir`
-(sub-folder `audio/` is created automatically).  The microphone device index
-is controlled via `[audio].input_device_index` in `config.toml`.
+(sub-folder `audio/` is created automatically).  The microphone is auto-detected
+by PortAudio device name (default match `"usb"`; tune with
+`NOMON_AUDIO_INPUT_NAME`).  Set `[audio].input_device_index` only to force an
+explicit PortAudio index — these are not ALSA card numbers, and a wrong value
+can crash libportaudio on the Pi.
 
 Sensitive values (SSH keys, JWT secrets, MQTT credentials) belong in mode-specific
 env files rather than `config.toml`.  Copy the appropriate example file and fill

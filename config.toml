@@ -2,16 +2,21 @@
 # Safe defaults — edit to suit your deployment.
 # Sensitive values (SSH keys, JWT secrets, MQTT credentials) belong in .env.
 
-# ─── MJPEG stream server ─────────────────────────────────────────────────────
+# ─── Camera & stream server ──────────────────────────────────────────────────
 [stream]
-# Network interface to bind.  "0.0.0.0" = all interfaces, "127.0.0.1" = loopback only.
+# Network interface/port for the standalone debug MJPEG server only
+# (nomothetic-stream.service — manual debugging, not boot-enabled). The
+# normal path, POST /api/stream/start, uses its own host/port instead.
 host = "0.0.0.0"
 port = 8000
 
 # Camera device index (usually 0 for the first attached camera).
 camera_index = 0
 
-# Capture resolution and frame rate.
+# Capture resolution and frame rate. Shared by the API-managed camera (still
+# capture, recording, and POST /api/stream/start) and the debug server above
+# — there is only one physical camera. Lower these to cut camera CPU/memory
+# load, especially when running concurrently with STT/wake-word.
 width  = 1280
 height = 720
 fps    = 30
@@ -49,14 +54,37 @@ dir = "~/perceptua-nomon/media"
 
 # ─── Audio input ─────────────────────────────────────────────────────────────
 [audio]
-# ALSA device index for the USB microphone (PCM2902 = card 2 on Robot HAT V4).
-input_device_index = 2
+# The microphone is auto-detected by PortAudio device name (first input device
+# whose name contains "usb" — see NOMON_AUDIO_INPUT_NAME in .env.device.example).
+# Only set input_device_index to force an explicit PortAudio device index.
+# CAUTION: PortAudio indexes are NOT ALSA card numbers — opening a blind
+# numeric index segfaulted libportaudio on the Pi and killed the API process.
+# input_device_index = 0
 # Default output volume applied automatically before audio playback (0–100).
 # Exported as NOMON_AUDIO_VOLUME and read by the nomopractic IPC set_volume call.
 default_volume_pct = 80
-# Default microphone capture gain applied automatically before recording (0–100).
-# Exported as NOMON_AUDIO_MIC_GAIN and read by the nomopractic IPC set_mic_gain call.
-default_mic_gain_pct = 50
+# Default microphone capture gain applied automatically before recording and
+# on the wake-word listener's capture (0–100). Exported as NOMON_AUDIO_MIC_GAIN
+# and read by the nomopractic IPC set_mic_gain call. The USB PCM2902 is a quiet
+# electret; 80 gives Vosk a stronger signal than the old 50 default. Lower it if
+# capture clips (crackle/distortion on loud speech).
+default_mic_gain_pct = 80
+
+# ─── Wake word (on-robot voice commands, ADR-021) ───────────────────────────
+[wakeword]
+# Catch phrase the robot listens for on its USB microphone. Empty = not set
+# here (the feature stays controlled by NOMON_WAKE_PHRASE in .env.device); a
+# non-empty phrase in this file overrides .env.device. Every word must exist
+# in the Vosk model's vocabulary — add variants for out-of-vocabulary words
+# like "nomon" (see docs/pi_setup.md).
+phrase = ""
+# Extra comma-separated spellings that also count as the wake phrase.
+phrase_variants = ""
+# Seconds the conversation stays open for follow-up commands after a reply
+# (no re-wake needed); 0 disables follow-ups.
+followup_window_s = 8
+# Chime output volume (0–100) for the wake/processing/success/error tones.
+chime_volume_pct = 80
 
 # ─── Telemetry ───────────────────────────────────────────────────────────────
 [telemetry]
