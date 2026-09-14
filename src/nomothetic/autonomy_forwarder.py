@@ -80,6 +80,10 @@ class AutonomyEventForwarder:
         device_id: Optional[str] = None,
         qos: int = 1,
         max_queue: int = _MAX_QUEUE_DEFAULT,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        tls: bool = False,
+        ca_cert: Optional[str] = None,
     ) -> None:
         if mqtt is None:
             raise ImportError(
@@ -93,6 +97,10 @@ class AutonomyEventForwarder:
         self.topic = topic
         self.device_id = device_id or TelemetryPublisher.get_device_id()
         self.qos = qos
+        self.username = username
+        self.password = password
+        self.tls = tls
+        self.ca_cert = ca_cert
 
         self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=max_queue)
         self._stop_event = threading.Event()
@@ -122,12 +130,15 @@ class AutonomyEventForwarder:
         -------
         AutonomyEventForwarder or None
         """
+        from nomothetic.telemetry import mqtt_port_from_env, mqtt_security_from_env
+
         broker = os.environ.get("NOMON_MQTT_BROKER", "").strip()
         if not broker:
             return None
-        port = int(os.environ.get("NOMON_MQTT_PORT", "1883"))
+        security = mqtt_security_from_env()
+        port = mqtt_port_from_env(security["tls"])
         topic = os.environ.get("NOMON_MQTT_AUTONOMY_TOPIC", DEFAULT_AUTONOMY_TOPIC)
-        return cls(broker=broker, port=port, topic=topic, device_id=device_id)
+        return cls(broker=broker, port=port, topic=topic, device_id=device_id, **security)
 
     # -------------------------------------------------------------------------
     # Public API
@@ -204,9 +215,19 @@ class AutonomyEventForwarder:
 
     def _create_client(self) -> Any:
         """Create and configure a paho-mqtt client."""
+        from nomothetic.telemetry import apply_mqtt_security
+
         client = mqtt.Client(
             callback_api_version=CallbackAPIVersion.VERSION2,
             client_id=f"nomon-autonomy-{self.device_id}",
+        )
+        apply_mqtt_security(
+            client,
+            username=self.username,
+            password=self.password,
+            tls=self.tls,
+            ca_cert=self.ca_cert,
+            role="autonomy",
         )
         client.on_disconnect = self._on_disconnect
         return client

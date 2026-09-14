@@ -989,8 +989,29 @@ def provision_tls_cert(cert_path: Path, key_path: Path) -> str:
 _camera: Optional[Camera] = None
 _hat_client: Optional[HatClient] = None
 _stream_server: Optional[StreamServer] = None
-_stream_host: str = "0.0.0.0"
+# Loopback by default (review finding S-8): the MJPEG server is plain HTTP and
+# token-in-URL; clients get the stream over TLS via /api/stream/live instead.
+_stream_host: str = "127.0.0.1"
 _stream_port: int = 8000
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return whether *host* names the loopback interface."""
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return True
+    try:
+        from ipaddress import ip_address as _ip
+
+        return _ip(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _truthy_env(name: str) -> bool:
+    """Return whether env var *name* is set to a truthy value (1/true/yes)."""
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
+
+
 # Per-run access token required by the MJPEG stream server (regenerated on
 # every stream start; None while no stream is running).
 _stream_token: Optional[str] = None
@@ -1115,7 +1136,7 @@ async def lifespan(app: FastAPI):
     # Resolve media directory from environment (set by start.sh from config.toml)
     _media_dir = Path(os.environ.get("NOMON_MEDIA_DIR", "~/perceptua-nomon/media")).expanduser()
     # Resolve stream defaults from environment (set by start.sh from [stream] config)
-    _stream_host = os.environ.get("NOM_STREAM_HOST", "0.0.0.0")
+    _stream_host = os.environ.get("NOM_STREAM_HOST", "127.0.0.1")
     _stream_port = int(os.environ.get("NOM_STREAM_PORT", "8000"))
     # Resolve camera capture settings from environment (set by start.sh, or
     # directly in .env.device, from [stream] config). Defaults match Camera's
@@ -1267,6 +1288,9 @@ def _setup_central_stores(app: FastAPI) -> None:
     # Per-app rate limiters so each test client gets fresh instances
     app.state.login_limiter = RateLimiter(max_requests=5, window_seconds=60)
     app.state.register_limiter = RateLimiter(max_requests=10, window_seconds=60)
+    # Review S-14: refresh and the routine event sink were unlimited.
+    app.state.refresh_limiter = RateLimiter(max_requests=20, window_seconds=60)
+    app.state.events_limiter = RateLimiter(max_requests=120, window_seconds=60)
 
     # Database-backed stores when ArcadeDB is configured
     user_store: UserStore
@@ -1345,7 +1369,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
     )
 
     if device_auth_enabled:
-        from nomothetic.auth import AuthService, jwt_required, set_auth_service
+        from nomothetic.auth import AuthService, set_auth_service
         from nomothetic.device_auth_routes import create_device_auth_router
         from nomothetic.pairing import PairingState
         from nomothetic.rate_limit import RateLimiter
@@ -1365,39 +1389,49 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         app.state.pairing_state = pairing
         app.state.pairing_limiter = RateLimiter(max_requests=3, window_seconds=60)
         app.state.network_limiter = RateLimiter(max_requests=5, window_seconds=60)
+        # Review S-14: refresh and the routine event sink were unlimited.
+        app.state.refresh_limiter = RateLimiter(max_requests=20, window_seconds=60)
+        app.state.events_limiter = RateLimiter(max_requests=120, window_seconds=60)
 
         # PairingState is always constructed fresh here, so is_paired() is
         # always False at this point. The guard is retained for clarity and
         # to make the intent explicit should persistent state be added later.
         if not pairing.is_paired():
             secret = pairing.load_or_generate_secret()
-            # Write the secret to a file on tmpfs so the operator can read it
-            # via SSH without it appearing in the journal.
+            # The Soft AP WPA2 passphrase is a separate, long secret (review
+            # S-1): the 8-digit code is typed into the app, the passphrase is
+            # entered once in the phone's Wi-Fi settings.
+            ap_passphrase = pairing.load_or_generate_ap_passphrase()
+            # Write both to files on tmpfs so the operator can read them via
+            # SSH without them appearing in the journal.
             # StandardError=journal captures all stderr output, so printing
-            # the secret value there would persist it in the journal.
-            _secret_display_path = "/run/nomothetic/pairing-secret"
-            try:
-                import os as _os
+            # the values there would persist them in the journal.
+            import os as _os
 
-                _fd = _os.open(
-                    _secret_display_path,
-                    _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC,
-                    0o600,  # owner-read-only: pairing secret must not be world-readable
-                )
+            for _display_path, _value, _label in (
+                ("/run/nomothetic/pairing-secret", secret, "Pairing secret"),
+                ("/run/nomothetic/ap-passphrase", ap_passphrase, "Soft AP passphrase"),
+            ):
                 try:
-                    _os.write(_fd, secret.encode())
-                finally:
-                    _os.close(_fd)
-                logger.info(
-                    "Pairing secret written to %s — read it there to pair",
-                    _secret_display_path,
-                )
-            except OSError:
-                logger.warning(
-                    "Could not write pairing secret to %s",
-                    _secret_display_path,
-                    exc_info=True,
-                )
+                    _fd = _os.open(
+                        _display_path,
+                        _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC,
+                        0o600,  # owner-read-only: secrets must not be world-readable
+                    )
+                    try:
+                        _os.write(_fd, _value.encode())
+                    finally:
+                        _os.close(_fd)
+                    logger.info("%s written to %s — read it there to pair", _label, _display_path)
+                except OSError:
+                    logger.warning(
+                        "Could not write %s to %s", _label.lower(), _display_path, exc_info=True
+                    )
+
+        # Per-device Ed25519 identity for fleet registration proofs (review S-3).
+        from nomothetic.device_identity import DeviceIdentity
+
+        app.state.device_identity = DeviceIdentity()
 
         app.include_router(create_device_auth_router())
 
@@ -1409,10 +1443,15 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
 
         app.state.plugin_key_store = PluginKeyStore()
         app.state.plugin_challenge_store = ChallengeStore()
+        app.state.plugin_auth_limiter = RateLimiter(max_requests=30, window_seconds=60)
         app.include_router(create_plugin_auth_router())
 
+        # Owner tokens pass everything; plugin tokens (ADR-019) are confined to
+        # the raw I/O surface (auth.PLUGIN_ALLOWED_ROUTES) — review finding S-2.
+        from nomothetic.auth import device_jwt_required
+
         device_router = APIRouter(
-            dependencies=[Depends(jwt_required)],
+            dependencies=[Depends(device_jwt_required)],
         )
     else:
         logger.warning(
@@ -1506,6 +1545,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
     # so /api/voice/wake can enable it at runtime; it auto-starts in the
     # lifespan when NOMON_WAKE_PHRASE is set. Player/HAT/media dependencies
     # are late-bound lambdas because those globals are created in the lifespan.
+    from nomothetic.auth import seconds_since_owner_contact
     from nomothetic.wake import WakeWordListener
     from nomothetic.wake_routes import create_wake_router
 
@@ -1517,6 +1557,9 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         get_hat=lambda: _hat_client,
         get_chime_dir=lambda: _media_dir / "audio" / "chimes",
         tts_engine=app.state.tts_engine,
+        # Review S-11: voice may only move the robot while the owner's app is
+        # in contact (see NOMON_WAKE_MOTION_TOOLS).
+        owner_presence_s=seconds_since_owner_contact,
     )
     device_router.include_router(create_wake_router())
 
@@ -1729,6 +1772,16 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
 
         host = request.host or _stream_host
         port = request.port or _stream_port
+        # The internal MJPEG server is cleartext with a query-string token, so
+        # it stays on loopback unless the operator explicitly opts in; viewers
+        # use the TLS relay at /api/stream/live (review finding S-8).
+        if not _is_loopback_host(host) and not _truthy_env("NOMON_STREAM_ALLOW_REMOTE_BIND"):
+            logger.warning(
+                "stream host %r is not loopback; binding to 127.0.0.1 instead "
+                "(set NOMON_STREAM_ALLOW_REMOTE_BIND=1 to allow a LAN bind)",
+                host,
+            )
+            host = "127.0.0.1"
 
         if _stream_server is not None:
             url = f"http://{_stream_server.host}:{_stream_server.port}"

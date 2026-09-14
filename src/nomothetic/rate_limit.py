@@ -136,6 +136,35 @@ async def ai_rate_limit(request: Request) -> None:
     limiter.check(_client_ip(request))
 
 
+def _check_optional(request: Request, attr: str) -> None:
+    """Apply ``app.state.<attr>`` if the app configured it; a bare router is exempt."""
+    limiter: RateLimiter | None = getattr(request.app.state, attr, None)
+    if limiter is not None:
+        limiter.check(_client_ip(request))
+
+
+async def refresh_rate_limit(request: Request) -> None:
+    """Rate-limit token refresh (device and central): 20/min per IP (review S-14)."""
+    _check_optional(request, "refresh_limiter")
+
+
+async def events_rate_limit(request: Request) -> None:
+    """Rate-limit the routine event sink: 120/min per IP (review S-14)."""
+    _check_optional(request, "events_limiter")
+
+
+async def plugin_auth_rate_limit(request: Request) -> None:
+    """FastAPI dependency that rate-limits the plugin challenge/token endpoints.
+
+    Reads the ``plugin_auth_limiter`` from ``app.state`` (created in
+    ``create_app``).  Allows 30 requests per minute per IP address — an
+    on-device plugin acquires a token once per hour, so this only bites a
+    flood that would otherwise evict legitimate nonces (review finding S-12).
+    """
+    limiter: RateLimiter = request.app.state.plugin_auth_limiter
+    limiter.check(_client_ip(request))
+
+
 async def stt_rate_limit(request: Request) -> None:
     """FastAPI dependency that enforces voice transcription rate limiting.
 

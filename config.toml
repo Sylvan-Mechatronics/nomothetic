@@ -7,7 +7,10 @@
 # Network interface/port for the standalone debug MJPEG server only
 # (nomothetic-stream.service — manual debugging, not boot-enabled). The
 # normal path, POST /api/stream/start, uses its own host/port instead.
-host = "0.0.0.0"
+# Loopback by default: the stream is cleartext with a query-string token, and
+# the API relays it over TLS at /api/stream/live. Bind a LAN address here only
+# for deliberate manual debugging on a trusted network.
+host = "127.0.0.1"
 port = 8000
 
 # Camera device index (usually 0 for the first attached camera).

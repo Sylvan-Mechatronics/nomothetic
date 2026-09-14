@@ -147,6 +147,54 @@ def test_from_env_reads_all_vars(mock_mqtt_module, monkeypatch):
     assert pub.device_id == "env-device-01"
 
 
+def test_from_env_applies_credentials_and_tls(mock_mqtt_module, monkeypatch):
+    from nomothetic.telemetry import TelemetryPublisher
+
+    """NOMON_MQTT_USERNAME/PASSWORD/TLS configure the paho client (S-4)."""
+    _, mock_client_instance, _ = mock_mqtt_module
+    monkeypatch.setenv("NOMON_MQTT_BROKER", "broker.example")
+    monkeypatch.delenv("NOMON_MQTT_PORT", raising=False)
+    monkeypatch.setenv("NOMON_MQTT_USERNAME", "nomon-ab12")
+    monkeypatch.setenv("NOMON_MQTT_PASSWORD", "s3cret")
+    monkeypatch.setenv("NOMON_MQTT_TLS", "1")
+    pub = TelemetryPublisher.from_env()
+    assert pub.port == 8883  # TLS default port
+    mock_client_instance.username_pw_set.assert_called_once_with("nomon-ab12", "s3cret")
+    mock_client_instance.tls_set.assert_called_once_with()
+
+
+def test_from_env_private_ca_implies_tls(mock_mqtt_module, monkeypatch):
+    from nomothetic.telemetry import TelemetryPublisher
+
+    _, mock_client_instance, _ = mock_mqtt_module
+    monkeypatch.setenv("NOMON_MQTT_BROKER", "broker.example")
+    monkeypatch.delenv("NOMON_MQTT_TLS", raising=False)
+    monkeypatch.delenv("NOMON_MQTT_USERNAME", raising=False)
+    monkeypatch.setenv("NOMON_MQTT_CA_CERT", "/etc/nomothetic/mqtt-ca.pem")
+    pub = TelemetryPublisher.from_env()
+    assert pub.tls is True
+    mock_client_instance.tls_set.assert_called_once_with(ca_certs="/etc/nomothetic/mqtt-ca.pem")
+
+
+def test_from_env_plaintext_warns(mock_mqtt_module, monkeypatch, caplog):
+    from nomothetic.telemetry import TelemetryPublisher
+
+    _, mock_client_instance, _ = mock_mqtt_module
+    for var in (
+        "NOMON_MQTT_USERNAME",
+        "NOMON_MQTT_PASSWORD",
+        "NOMON_MQTT_TLS",
+        "NOMON_MQTT_CA_CERT",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("NOMON_MQTT_BROKER", "broker.example")
+    with caplog.at_level("WARNING", logger="nomothetic.telemetry"):
+        TelemetryPublisher.from_env()
+    assert "unauthenticated and cleartext" in caplog.text
+    mock_client_instance.username_pw_set.assert_not_called()
+    mock_client_instance.tls_set.assert_not_called()
+
+
 def test_from_env_raises_without_broker(mock_mqtt_module, monkeypatch):
     """from_env raises ValueError when NOMON_MQTT_BROKER is not set."""
     from nomothetic.telemetry import TelemetryPublisher

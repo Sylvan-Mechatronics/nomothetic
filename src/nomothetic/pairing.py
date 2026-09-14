@@ -5,8 +5,14 @@ On first boot, a pairing secret is generated and logged to the console.
 The device owner enters this secret via the nomotactic UI to claim the
 device and receive JWT tokens.
 
-The pairing secret is also written to a shared file so that nomopractic
-reads it as the WPA2 passphrase for the Wi-Fi Soft AP (see nomopractic ADR-005).
+A second, independent secret — the **Soft AP passphrase** — is written to its
+own shared file so that nomopractic reads it as the WPA2 passphrase for the
+Wi-Fi Soft AP (see nomopractic ADR-005). The two values are deliberately
+different: the 8-digit pairing code is short so a person can type it into the
+app, but an 8-digit WPA2 PSK can be recovered offline from a captured handshake
+in minutes. The AP passphrase is therefore a long random string (~116 bits) that
+the user enters once in their Wi-Fi settings, and network presence on the AP
+subnet proves possession of *that* secret (review finding S-1, 2026-09-13).
 
 See ADR-014 for design rationale.
 """
@@ -26,6 +32,49 @@ logger = logging.getLogger(__name__)
 _DEFAULT_PAIRING_SECRET_PATH = "/var/lib/nomon/pairing_secret"
 _PAIRING_SECRET_DIGITS = 8
 
+_DEFAULT_AP_PASSPHRASE_PATH = "/var/lib/nomon/ap_passphrase"
+# 20 characters from a 57-symbol alphabet ≈ 116 bits — far beyond offline
+# WPA2-PSK cracking. Ambiguous glyphs (0/O, 1/l/I) are omitted because the
+# user types this once into a phone's Wi-Fi dialog.
+_AP_PASSPHRASE_LENGTH = 20
+_AP_PASSPHRASE_ALPHABET = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+# WPA2-PSK passphrase bounds (IEEE 802.11i): 8–63 printable ASCII characters.
+_WPA2_MIN_LEN = 8
+_WPA2_MAX_LEN = 63
+
+
+def get_ap_passphrase_path() -> str:
+    """Return the configured Soft AP passphrase file path.
+
+    Reads from the ``NOMON_AP_PASSPHRASE_PATH`` environment variable, falling
+    back to ``/var/lib/nomon/ap_passphrase``. nomopractic's ``ap-mode.sh``
+    reads the same path (same env var, same default).
+
+    Returns
+    -------
+    str
+        Absolute path to the shared AP passphrase file.
+    """
+    return os.environ.get("NOMON_AP_PASSPHRASE_PATH", _DEFAULT_AP_PASSPHRASE_PATH)
+
+
+def is_valid_ap_passphrase(value: str) -> bool:
+    """Return whether *value* is a usable WPA2-PSK passphrase (8–63 printable ASCII).
+
+    Parameters
+    ----------
+    value : str
+        Candidate passphrase.
+    """
+    if not (_WPA2_MIN_LEN <= len(value) <= _WPA2_MAX_LEN):
+        return False
+    return all(32 <= ord(ch) <= 126 for ch in value)
+
+
+def generate_ap_passphrase() -> str:
+    """Return a fresh random Soft AP passphrase (see module docstring)."""
+    return "".join(secrets.choice(_AP_PASSPHRASE_ALPHABET) for _ in range(_AP_PASSPHRASE_LENGTH))
+
 
 def get_pairing_secret_path() -> str:
     """Return the configured pairing secret file path.
@@ -41,6 +90,27 @@ def get_pairing_secret_path() -> str:
     return os.environ.get("NOMON_PAIRING_SECRET_PATH", _DEFAULT_PAIRING_SECRET_PATH)
 
 
+def _read_secret_file(path: str) -> str | None:
+    """Read a shared secret file, returning its stripped contents or ``None``.
+
+    Parameters
+    ----------
+    path : str
+        File to read.
+
+    Returns
+    -------
+    str or None
+        The non-empty value, or ``None`` if the file is absent, unreadable, or
+        blank.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
 def _read_shared_secret() -> str | None:
     """Read the pairing secret from the shared file, if present and valid.
 
@@ -53,12 +123,12 @@ def _read_shared_secret() -> str | None:
         The pairing secret read from disk, or ``None`` if the file is absent
         or cannot be read.
     """
-    path = get_pairing_secret_path()
-    try:
-        with open(path, encoding="utf-8") as fh:
-            return fh.read().strip() or None
-    except OSError:
-        return None
+    return _read_secret_file(get_pairing_secret_path())
+
+
+def _read_shared_ap_passphrase() -> str | None:
+    """Read the Soft AP passphrase from its shared file, or ``None``."""
+    return _read_secret_file(get_ap_passphrase_path())
 
 
 def _secret_file_present(path: str) -> bool:
@@ -75,27 +145,52 @@ def _secret_file_present(path: str) -> bool:
 
 
 def _write_shared_secret(secret: str) -> None:
-    """Write the pairing secret to the shared file atomically.
-
-    Uses a write-to-temp-then-rename pattern for atomicity.  Sets file
-    mode ``0640`` and group ``nomon`` so that nomopractic can read it.
-
-    If the target directory does not exist or permissions cannot be set,
-    a warning is logged but no exception is raised — HTTP pairing still
-    works; the shared file is used as the Wi-Fi Soft AP passphrase.
+    """Write the pairing secret to its shared file (see :func:`_write_secret_file`).
 
     Parameters
     ----------
     secret : str
         The pairing secret to persist.
     """
-    path = get_pairing_secret_path()
+    _write_secret_file(get_pairing_secret_path(), secret, "Pairing secret")
+
+
+def _write_shared_ap_passphrase(passphrase: str) -> None:
+    """Write the Soft AP passphrase to its shared file (see :func:`_write_secret_file`).
+
+    Parameters
+    ----------
+    passphrase : str
+        The WPA2 passphrase to persist for ``ap-mode.sh``.
+    """
+    _write_secret_file(get_ap_passphrase_path(), passphrase, "AP passphrase")
+
+
+def _write_secret_file(path: str, secret: str, label: str) -> None:
+    """Write a shared secret to *path* atomically.
+
+    Uses a write-to-temp-then-rename pattern for atomicity.  Sets file
+    mode ``0640`` and group ``nomon`` so that nomopractic can read it.
+
+    If the target directory does not exist or permissions cannot be set,
+    a warning is logged but no exception is raised — HTTP pairing still
+    works; only the Wi-Fi Soft AP is affected.
+
+    Parameters
+    ----------
+    path : str
+        Destination file.
+    secret : str
+        The value to persist.
+    label : str
+        Human-readable name used in log messages.
+    """
     target_dir = os.path.dirname(path)
 
     if not os.path.isdir(target_dir):
         logger.warning(
-            "Pairing secret directory %s does not exist; "
-            "Wi-Fi Soft AP will not work until it is created",
+            "%s directory %s does not exist; Wi-Fi Soft AP will not work until it is created",
+            label,
             target_dir,
         )
         return
@@ -103,7 +198,7 @@ def _write_shared_secret(secret: str) -> None:
     fd = None
     tmp_path = None
     try:
-        fd, tmp_path = tempfile.mkstemp(dir=target_dir, prefix=".pairing_secret_")
+        fd, tmp_path = tempfile.mkstemp(dir=target_dir, prefix=f".{os.path.basename(path)}_")
         os.write(fd, secret.encode("utf-8"))
         os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP)  # 0o640
         os.close(fd)
@@ -114,16 +209,18 @@ def _write_shared_secret(secret: str) -> None:
             os.chown(tmp_path, -1, nomon_gid)
         except (KeyError, PermissionError):
             logger.warning(
-                "Could not set group 'nomon' on pairing secret file; "
-                "nomopractic may not be able to read it as the Wi-Fi Soft AP passphrase"
+                "Could not set group 'nomon' on %s file; "
+                "nomopractic may not be able to read it for the Wi-Fi Soft AP",
+                label.lower(),
             )
 
         os.rename(tmp_path, path)
-        logger.info("Pairing secret written to %s", path)
+        logger.info("%s written to %s", label, path)
         tmp_path = None  # rename succeeded — don't clean up
     except OSError:
         logger.warning(
-            "Failed to write pairing secret to %s; Wi-Fi Soft AP passphrase will not be available",
+            "Failed to write %s to %s; Wi-Fi Soft AP may not be available",
+            label.lower(),
             path,
             exc_info=True,
         )
@@ -161,6 +258,9 @@ class PairingState:
         self._last_secret: str | None = None
         self.paired: bool = False
         self.owner_email: str | None = None
+        # Soft AP WPA2 passphrase — independent of the 8-digit pairing code
+        # (see module docstring). Populated by load_or_generate_ap_passphrase().
+        self.ap_passphrase: str | None = None
         # JWT signing secret is loaded from (or generated into) the persistent
         # store at /var/lib/nomon/device_jwt_secret so it survives AP → WiFi
         # mode switches and service restarts.  See DeviceJwtSecretStore (ADR-016).
@@ -238,6 +338,56 @@ class PairingState:
         _write_shared_secret(secret)
         return secret
 
+    def load_or_generate_ap_passphrase(self) -> str:
+        """Load the Soft AP passphrase from its shared file or generate a new one.
+
+        Mirrors :meth:`load_or_generate_secret` for the WPA2 passphrase:
+
+        - a valid stored value (8–63 printable ASCII) is loaded and kept, so the
+          hotspot passphrase is stable across restarts;
+        - a file that exists but cannot be read is never overwritten (the
+          hotspot keeps whatever it has); an in-memory value is used this run;
+        - otherwise a fresh passphrase is generated and persisted.
+
+        Returns
+        -------
+        str
+            The active Soft AP passphrase.
+        """
+        path = get_ap_passphrase_path()
+        existing = _read_shared_ap_passphrase()
+        if existing is not None and is_valid_ap_passphrase(existing):
+            self.ap_passphrase = existing
+            logger.info("Loaded existing Soft AP passphrase from %s", path)
+            return existing
+
+        if existing is None and _secret_file_present(path):
+            logger.error(
+                "Soft AP passphrase file %s exists but could not be read; using an "
+                "in-memory passphrase for this session without overwriting the file.",
+                path,
+            )
+            self.ap_passphrase = generate_ap_passphrase()
+            return self.ap_passphrase
+
+        logger.warning(
+            "Generating a new Soft AP passphrase (%s)",
+            "no stored passphrase" if existing is None else "stored value is not a valid WPA2 PSK",
+        )
+        return self.generate_ap_passphrase()
+
+    def generate_ap_passphrase(self) -> str:
+        """Generate and persist a fresh Soft AP passphrase.
+
+        Returns
+        -------
+        str
+            The new passphrase (also stored on ``self.ap_passphrase``).
+        """
+        self.ap_passphrase = generate_ap_passphrase()
+        _write_shared_ap_passphrase(self.ap_passphrase)
+        return self.ap_passphrase
+
     def get_active_secret(self) -> str | None:
         """Return the current pairing secret from memory or the shared file."""
         if self.secret is not None:
@@ -309,16 +459,18 @@ class PairingState:
         self.jwt_secret = DeviceJwtSecretStore().rotate()
 
     def reset(self) -> None:
-        """Clear pairing state, rotate JWT state, and delete the pairing secret.
+        """Clear pairing state, rotate JWT state, and delete both shared secrets.
 
-        Deletes the on-disk pairing secret file so the next service startup
-        generates a fresh passphrase.  After reset the device is unpaired and
-        a new pairing secret must be generated via :meth:`generate_secret` or
-        :meth:`load_or_generate_secret`.
+        Deletes the on-disk pairing secret and Soft AP passphrase files so the
+        next service startup generates fresh values.  After reset the device is
+        unpaired and a new pairing secret must be generated via
+        :meth:`generate_secret` or :meth:`load_or_generate_secret`.
         """
         self.reset_session()
         self._last_secret = None
-        try:
-            os.unlink(get_pairing_secret_path())
-        except OSError:
-            pass
+        self.ap_passphrase = None
+        for path in (get_pairing_secret_path(), get_ap_passphrase_path()):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass

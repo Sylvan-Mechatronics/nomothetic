@@ -31,6 +31,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import uuid
@@ -40,7 +41,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from nomothetic.routine_catalog import catalog_path, published_autonomon_bin
+from nomothetic.routine_catalog import (
+    catalog_path,
+    published_autonomon_bin,
+    published_params_schema,
+)
 from nomothetic.routine_log_store import (
     InvalidRoutineName,
     RoutineLogStore,
@@ -60,6 +65,60 @@ _ENV_PASSTHROUGH = ("PATH", "HOME", "USER", "LANG", "LC_ALL", "LD_LIBRARY_PATH",
 # Floor for a client-supplied heartbeat timeout, so the connection-loss guard
 # cannot be set uselessly low. The operator-configured default is exempt.
 _MIN_HEARTBEAT_TIMEOUT_S = 5.0
+
+# Review S-10: routine params are forwarded to the brain verbatim, so they are
+# allow-listed here against the schema autonomon publishes. Keys must look like
+# identifiers, values must be scalars, and — when a schema is published — every
+# key must be declared with a matching type.
+_PARAM_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_MAX_PARAM_STRING = 512
+_SCHEMA_TYPES: dict[str, tuple[type, ...]] = {
+    "number": (int, float),
+    "integer": (int,),
+    "string": (str,),
+    "boolean": (bool,),
+}
+
+
+def validate_routine_params(params: Mapping[str, Any], schema: Mapping[str, Any]) -> None:
+    """Reject routine params the published catalogue does not declare.
+
+    Parameters
+    ----------
+    params : Mapping
+        Client-supplied routine parameters.
+    schema : Mapping
+        ``params_schema`` from the published catalogue (``{}`` when none).
+
+    Raises
+    ------
+    ValueError
+        On a malformed key, a non-scalar or oversized value, an undeclared key
+        (when a schema is published), or a type mismatch with the schema.
+    """
+    for key, value in params.items():
+        if not isinstance(key, str) or not _PARAM_KEY_RE.match(key):
+            raise ValueError(f"invalid routine param name {key!r}")
+        if key == "routine":
+            raise ValueError("'routine' is selected by the request, not a param")
+        if isinstance(value, bool) or isinstance(value, (int, float, str)) or value is None:
+            pass
+        else:
+            raise ValueError(f"routine param {key!r} must be a scalar (got {type(value).__name__})")
+        if isinstance(value, str) and len(value) > _MAX_PARAM_STRING:
+            raise ValueError(f"routine param {key!r} is too long (max {_MAX_PARAM_STRING} chars)")
+        if not schema:
+            continue
+        spec = schema.get(key)
+        if not isinstance(spec, Mapping):
+            raise ValueError(f"unknown routine param {key!r}")
+        expected = _SCHEMA_TYPES.get(str(spec.get("type", "")))
+        if expected is None or value is None:
+            continue
+        if isinstance(value, bool) and bool not in expected:
+            raise ValueError(f"routine param {key!r} must be {spec.get('type')}")
+        if not isinstance(value, expected):
+            raise ValueError(f"routine param {key!r} must be {spec.get('type')}")
 
 
 def _now_iso() -> str:
@@ -398,6 +457,8 @@ class RoutineManager:
         params = params or {}
         if not isinstance(params, dict):
             raise ValueError("params must be a JSON object")
+        schema = await asyncio.to_thread(published_params_schema, self._config.routine_catalog_path)
+        validate_routine_params(params, schema)
         if not self._config.has_credentials():
             raise RoutineCredentialsError(
                 "no plugin credential configured; set NOMON_PLUGIN_KEY or NOMON_PLUGIN_TOKEN"

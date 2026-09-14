@@ -21,9 +21,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Path, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from pydantic import BaseModel, Field
 
+from nomothetic.rate_limit import events_rate_limit
 from nomothetic.routine_log_store import InvalidRoutineName, RoutineLogStore
 
 logger = logging.getLogger(__name__)
@@ -131,7 +132,12 @@ def create_routine_router() -> APIRouter:
             )
         return store
 
-    @router.post("/{routine}/events", response_model=RoutineEventAck, status_code=200)
+    @router.post(
+        "/{routine}/events",
+        response_model=RoutineEventAck,
+        status_code=200,
+        dependencies=[Depends(events_rate_limit)],
+    )
     async def report_event(
         body: RoutineEventRequest,
         request: Request,

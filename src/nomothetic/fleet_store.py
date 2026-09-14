@@ -97,6 +97,14 @@ class FleetStore(Protocol):
         """
         ...  # pragma: no cover
 
+    async def get_device_public_key(self, vin: str) -> Optional[str]:
+        """Return the PEM public key pinned to *vin*, or ``None`` (review S-3)."""
+        ...  # pragma: no cover
+
+    async def set_device_public_key(self, vin: str, public_key_pem: str) -> None:
+        """Pin *public_key_pem* to *vin* (first registration only)."""
+        ...  # pragma: no cover
+
     async def remove_device(self, owner_email: str, vin: str) -> bool:
         """Remove a device from an owner's fleet.
 
@@ -143,6 +151,7 @@ class InMemoryFleetStore:
     def __init__(self) -> None:
         # {email: {vin: DeviceItem}}
         self._devices: dict[str, dict[str, DeviceItem]] = {}
+        self._device_keys: dict[str, str] = {}
 
     async def get_devices(self, owner_email: str) -> list[DeviceItem]:
         """Return all devices owned by the user."""
@@ -180,6 +189,12 @@ class InMemoryFleetStore:
         """
         bucket = self._devices.get(owner_email, {})
         return bucket.pop(vin, None) is not None
+
+    async def get_device_public_key(self, vin: str) -> Optional[str]:
+        return self._device_keys.get(vin)
+
+    async def set_device_public_key(self, vin: str, public_key_pem: str) -> None:
+        self._device_keys[vin] = public_key_pem
 
     async def device_exists(self, vin: str) -> bool:
         """Check whether any user owns a device with this VIN."""
@@ -344,6 +359,20 @@ class SqlFleetStore:
         )
         await self._db.execute_sql(query, {"email": owner_email, "vin": vin})
         return True
+
+    async def get_device_public_key(self, vin: str) -> Optional[str]:
+        """Return ``Vehicle.device_public_key`` for *vin* (nomographic V5), or ``None``."""
+        query = "SELECT device_public_key FROM Vehicle WHERE vin = :vin"
+        rows = await self._db.execute_sql(query, {"vin": vin})
+        if not rows:
+            return None
+        value = rows[0].get("device_public_key")
+        return value if isinstance(value, str) and value else None
+
+    async def set_device_public_key(self, vin: str, public_key_pem: str) -> None:
+        """Pin the device public key on the Vehicle vertex."""
+        query = "UPDATE Vehicle SET device_public_key = :pem WHERE vin = :vin"
+        await self._db.execute_sql(query, {"pem": public_key_pem, "vin": vin})
 
     async def device_exists(self, vin: str) -> bool:
         """Check whether a Vehicle with this VIN exists."""

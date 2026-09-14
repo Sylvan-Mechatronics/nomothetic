@@ -35,7 +35,7 @@ import logging
 import os
 import stat
 import tempfile
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from typing import Any
 
 from fastapi import HTTPException
@@ -56,6 +56,10 @@ _DEFAULT_MODEL = "claude-sonnet-5"
 _DEFAULT_MAX_TOKENS = 2048
 _DEFAULT_MAX_TOOL_ITERATIONS = 8
 _REQUEST_TIMEOUT_S = 120.0
+
+# Tools that move the robot or start autonomy. Voice commands may only use
+# these while the owner's app is in contact (review S-11); see wake.py.
+MOTION_TOOLS: frozenset[str] = frozenset({"drive", "steer", "start_routine"})
 
 _SYSTEM_PROMPT = """\
 You are the chat assistant on board a nomon robot — a small Raspberry Pi rover with drive
@@ -474,7 +478,12 @@ class AiCommandService:
         """Names of the registered tools (stable order)."""
         return [param["name"] for param in self._tool_params]
 
-    async def run_command(self, messages: list[dict[str, Any]], api_key: str) -> dict[str, Any]:
+    async def run_command(
+        self,
+        messages: list[dict[str, Any]],
+        api_key: str,
+        allowed_tools: Collection[str] | None = None,
+    ) -> dict[str, Any]:
         """Run one chat command through the Claude tool loop.
 
         Parameters
@@ -485,6 +494,10 @@ class AiCommandService:
             cross requests; each call is one self-contained agentic run.
         api_key : str
             Anthropic API key to use for this run.
+        allowed_tools : collection of str, optional
+            When given, only these tool names are offered to the model and any
+            other tool call is refused (used by the wake-word listener to keep
+            voice from moving the robot without operator presence, review S-11).
 
         Returns
         -------
@@ -511,13 +524,19 @@ class AiCommandService:
         client = factory(api_key)
         convo: list[dict[str, Any]] = [dict(message) for message in messages]
         actions: list[dict[str, Any]] = []
+        allowed = None if allowed_tools is None else frozenset(allowed_tools)
+        tool_params = (
+            self._tool_params
+            if allowed is None
+            else [p for p in self._tool_params if p["name"] in allowed]
+        )
         try:
             for _ in range(self._max_tool_iterations):
-                response = await self._create_message(client, convo)
+                response = await self._create_message(client, convo, tool_params)
                 if getattr(response, "stop_reason", None) != "tool_use":
                     return self._final_result(response, actions)
                 convo.append({"role": "assistant", "content": response.content})
-                tool_results = await self._run_tool_blocks(response.content, actions)
+                tool_results = await self._run_tool_blocks(response.content, actions, allowed)
                 convo.append({"role": "user", "content": tool_results})
             logger.warning(
                 "AI command hit the tool-iteration limit (%d)", self._max_tool_iterations
@@ -538,7 +557,12 @@ class AiCommandService:
     # Agentic loop internals
     # ------------------------------------------------------------------
 
-    async def _create_message(self, client: Any, convo: list[dict[str, Any]]) -> Any:
+    async def _create_message(
+        self,
+        client: Any,
+        convo: list[dict[str, Any]],
+        tool_params: list[dict[str, Any]] | None = None,
+    ) -> Any:
         """Call the Messages API once, mapping SDK errors to our error types."""
         try:
             return await client.messages.create(
@@ -546,7 +570,7 @@ class AiCommandService:
                 max_tokens=self._max_tokens,
                 system=_SYSTEM_PROMPT,
                 messages=convo,
-                tools=self._tool_params,
+                tools=self._tool_params if tool_params is None else tool_params,
                 thinking={"type": "adaptive"},
             )
         except Exception as exc:
@@ -576,7 +600,10 @@ class AiCommandService:
         }
 
     async def _run_tool_blocks(
-        self, content: Any, actions: list[dict[str, Any]]
+        self,
+        content: Any,
+        actions: list[dict[str, Any]],
+        allowed: frozenset[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Execute every tool_use block in *content*, recording actions as we go."""
         results: list[dict[str, Any]] = []
@@ -584,7 +611,10 @@ class AiCommandService:
             if getattr(block, "type", None) != "tool_use":
                 continue
             tool_input = dict(block.input or {})
-            ok, payload = await self._execute_tool(block.name, tool_input)
+            if allowed is not None and block.name not in allowed:
+                ok, payload = False, f"tool {block.name!r} is not available for this command"
+            else:
+                ok, payload = await self._execute_tool(block.name, tool_input)
             record: dict[str, Any] = {"tool": block.name, "input": tool_input, "ok": ok}
             if ok:
                 record["result"] = payload

@@ -52,8 +52,10 @@ Drop HTTPS, TOFU, `react-native-ssl-pinning`, the cert generation module
 
 The TOFU/pinning approach was implemented then reverted for the following reasons:
 
-1. **Threat model**: the AP is a WPA2 hotspot with a per-device PSK (the
-   6-digit pairing secret).  An attacker cannot join the AP without the PSK.
+1. **Threat model**: the AP is a WPA2 hotspot with a per-device PSK (since
+   2026-09-13 a separate 20-character `ap_passphrase`, not the short pairing
+   code — an 8-digit PSK is crackable offline from a captured handshake).  An
+   attacker cannot join the AP without the PSK.
    Physical co-presence is already required, and the `192.168.4.1` binding
    ensures the API is not reachable from other networks.  The incremental
    security benefit of TLS in this context is negligible.
@@ -280,7 +282,8 @@ service.  The only difference is the uvicorn configuration (host, port, cert).
 ## Rationale
 
 - **WPA2 as proximity control is unchanged** — an attacker still cannot join
-  the AP without the WPA2 passphrase (= pairing secret).  HTTPS adds a second
+  the AP without the WPA2 passphrase (a long random `ap_passphrase`, distinct
+  from the pairing secret since 2026-09-13).  HTTPS adds a second
   layer: co-present clients on the AP network cannot eavesdrop on API traffic
   or JWTs in transit.
 - **Minimal HTTP surface** — port 8080 serves only public data (the cert PEM).

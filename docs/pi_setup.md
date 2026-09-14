@@ -363,10 +363,13 @@ Expected:
 ### 7.2 Pairing secret and AP passphrase
 
 ```bash
-sudo cat /var/lib/nomon/pairing_secret
+sudo cat /var/lib/nomon/pairing_secret   # 8-digit code: typed into the app when pairing over the home network
+sudo cat /var/lib/nomon/ap_passphrase    # 20-char WPA2 passphrase: entered once in the phone's Wi-Fi settings
 ```
 
-Use this value for initial pairing / AP passphrase as configured by the AP flow.
+The two are deliberately different (review finding S-1): a short numeric WPA2
+PSK can be recovered offline from a captured handshake, so the hotspot uses its
+own long secret. Both are also mirrored to `/run/nomothetic/` at startup.
 
 ### 7.3 AP health check
 

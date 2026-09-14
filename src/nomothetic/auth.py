@@ -9,11 +9,12 @@ import hashlib
 import logging
 import os
 import secrets
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Optional
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -54,6 +55,29 @@ _MIN_SECRET_LENGTH = 32
 _JWT_ALGORITHM = "HS256"
 _JWT_ISSUER = "nomon-central"
 
+# Token scopes. An owner token (pairing / central login) may call everything;
+# a plugin token (ADR-019 challenge-response) is confined to the raw I/O surface
+# the brain needs — sensor reads, a camera frame, motion commands, and its own
+# status sink — so a compromised plugin process cannot re-pair the device,
+# change keys, provision Wi-Fi, or start other routines.
+SCOPE_OWNER = "owner"
+SCOPE_PLUGIN = "plugin"
+_PLUGIN_SUB_PREFIX = "plugin:"
+
+# (method, path-prefix) pairs a plugin-scoped token may call on the device
+# router. Prefix match on the request path; everything else is 403.
+PLUGIN_ALLOWED_ROUTES: tuple[tuple[str, str], ...] = (
+    ("GET", "/api/sensor/"),
+    ("GET", "/api/hat/battery"),
+    ("GET", "/api/camera/frame"),
+    ("POST", "/api/drive"),
+    ("POST", "/api/steer"),
+    ("POST", "/api/hat/motor/stop"),
+    ("POST", "/api/camera/pan"),
+    ("POST", "/api/camera/tilt"),
+    ("POST", "/api/routines/"),  # only the /{routine}/events sink — checked below
+)
+
 # ---------------------------------------------------------------------------
 # Bearer token extraction
 # ---------------------------------------------------------------------------
@@ -87,6 +111,10 @@ class TokenPayload(BaseModel):
     exp: int
     iat: int
     iss: str
+    scope: str = SCOPE_OWNER
+    """``"owner"`` for a paired owner / central user, ``"plugin"`` for an
+    on-device autonomy plugin (ADR-019). Plugin tokens are confined to the raw
+    I/O surface by :func:`device_jwt_required`."""
 
 
 class UserRecord(BaseModel):
@@ -339,6 +367,7 @@ class AuthService:
             "iat": int(now.timestamp()),
             "exp": int((now + _ACCESS_TOKEN_TTL).timestamp()),
             "iss": self._issuer,
+            "scope": SCOPE_OWNER,
         }
         header = {"alg": _JWT_ALGORITHM}
         token = _authlib_jwt.encode(header, payload, self._secret)
@@ -349,8 +378,10 @@ class AuthService:
 
         Issued only after a plugin proves possession of its registered private
         key (see :mod:`nomothetic.plugin_auth`). The token is signed with the
-        device JWT secret, so it is accepted by ``jwt_required`` exactly like an
-        owner token and is inherently scoped to this device.
+        device JWT secret, so it is inherently scoped to this device, and carries
+        ``scope="plugin"`` so :func:`device_jwt_required` confines it to the raw
+        I/O routes in :data:`PLUGIN_ALLOWED_ROUTES` and :func:`owner_required`
+        rejects it outright.
 
         The ``sub`` claim is ``plugin:<plugin_name>`` so plugin traffic is
         distinguishable from owner traffic in logs and downstream checks, and so
@@ -370,10 +401,11 @@ class AuthService:
         """
         now = datetime.now(timezone.utc)
         payload = {
-            "sub": f"plugin:{plugin_name}",
+            "sub": f"{_PLUGIN_SUB_PREFIX}{plugin_name}",
             "iat": int(now.timestamp()),
             "exp": int((now + ttl).timestamp()),
             "iss": self._issuer,
+            "scope": SCOPE_PLUGIN,
         }
         header = {"alg": _JWT_ALGORITHM}
         token = _authlib_jwt.encode(header, payload, self._secret)
@@ -498,7 +530,15 @@ class AuthService:
             raise ValueError("Token has expired") from exc
         except JoseError as exc:
             raise ValueError(f"Invalid token: {exc}") from exc
-        return TokenPayload(**dict(claims))
+        data = dict(claims)
+        # Tokens minted before the scope claim existed: infer it from ``sub`` so
+        # an in-flight plugin token is never upgraded to owner on deploy.
+        if "scope" not in data:
+            sub = str(data.get("sub", ""))
+            data["scope"] = SCOPE_PLUGIN if sub.startswith(_PLUGIN_SUB_PREFIX) else SCOPE_OWNER
+        elif data["scope"] not in (SCOPE_OWNER, SCOPE_PLUGIN):
+            raise ValueError("Invalid token: unknown scope")
+        return TokenPayload(**data)
 
     async def refresh_token(self, raw_refresh: str) -> dict:
         """Rotate a refresh token and issue new tokens.
@@ -611,3 +651,84 @@ async def jwt_required(
             detail=str(exc),
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
+
+
+def _plugin_may_call(method: str, path: str) -> bool:
+    """Return whether a plugin-scoped token may call *method* *path*.
+
+    Prefix-matches :data:`PLUGIN_ALLOWED_ROUTES`. The ``/api/routines/`` prefix
+    is narrowed to the per-routine event sink (``/api/routines/{name}/events``)
+    so a plugin cannot reach ``start``/``stop``/``heartbeat`` control routes.
+    """
+    for allowed_method, prefix in PLUGIN_ALLOWED_ROUTES:
+        if method != allowed_method or not path.startswith(prefix):
+            continue
+        if prefix == "/api/routines/":
+            tail = path[len(prefix) :].rstrip("/").split("/")
+            return len(tail) == 2 and tail[1] == "events" and bool(tail[0])
+        return True
+    return False
+
+
+# Monotonic timestamp of the last request carrying an owner-scoped token.
+# Read by the wake-word listener to decide whether voice may move the robot
+# (review S-11): "operator presence" means the owner's app has talked to the
+# device recently.
+_last_owner_contact: float | None = None
+
+
+def record_owner_contact() -> None:
+    """Note that an owner-scoped request was just served."""
+    global _last_owner_contact
+    _last_owner_contact = time.monotonic()
+
+
+def seconds_since_owner_contact() -> float | None:
+    """Seconds since the last owner-scoped request, or ``None`` if never."""
+    if _last_owner_contact is None:
+        return None
+    return time.monotonic() - _last_owner_contact
+
+
+async def device_jwt_required(
+    request: Request,
+    claims: TokenPayload = Depends(jwt_required),
+) -> TokenPayload:
+    """``jwt_required`` plus scope enforcement for the device router.
+
+    An owner token passes unchanged. A plugin token passes only for the raw
+    I/O routes in :data:`PLUGIN_ALLOWED_ROUTES`; any other route returns 403.
+
+    Raises
+    ------
+    HTTPException
+        401 on a missing/invalid token; 403 when a plugin token calls a route
+        outside its allow-list.
+    """
+    if claims.scope == SCOPE_PLUGIN and not _plugin_may_call(request.method, request.url.path):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="plugin tokens are limited to the raw I/O surface",
+        )
+    if claims.scope == SCOPE_OWNER:
+        record_owner_contact()
+    return claims
+
+
+async def owner_required(claims: TokenPayload = Depends(jwt_required)) -> TokenPayload:
+    """``jwt_required`` that additionally rejects plugin-scoped tokens.
+
+    For routes that manage the device session or identity (re-pairing, session
+    reset, registration proofs) which a plugin must never be able to call.
+
+    Raises
+    ------
+    HTTPException
+        401 on a missing/invalid token; 403 for a plugin-scoped token.
+    """
+    if claims.scope != SCOPE_OWNER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="owner token required",
+        )
+    return claims

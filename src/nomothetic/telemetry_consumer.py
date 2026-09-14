@@ -173,6 +173,10 @@ class TelemetryConsumer:
         qos: int = 1,
         autonomy_store: Optional[AutonomyStore] = None,
         autonomy_topic: str = "nomon/autonomy",
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        tls: bool = False,
+        ca_cert: Optional[str] = None,
     ) -> None:
         if mqtt is None:
             raise ImportError(
@@ -186,6 +190,10 @@ class TelemetryConsumer:
         self.topic = topic
         self.autonomy_topic = autonomy_topic
         self.qos = qos
+        self.username = username
+        self.password = password
+        self.tls = tls
+        self.ca_cert = ca_cert
 
         self._stop_event = threading.Event()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -220,10 +228,13 @@ class TelemetryConsumer:
         -------
         TelemetryConsumer or None
         """
+        from nomothetic.telemetry import mqtt_port_from_env, mqtt_security_from_env
+
         broker = os.environ.get("NOMON_MQTT_BROKER", "").strip()
         if not broker:
             return None
-        port = int(os.environ.get("NOMON_MQTT_PORT", "1883"))
+        security = mqtt_security_from_env()
+        port = mqtt_port_from_env(security["tls"])
         topic = os.environ.get("NOMON_MQTT_TOPIC", "nomon/telemetry")
         autonomy_topic = os.environ.get("NOMON_MQTT_AUTONOMY_TOPIC", "nomon/autonomy")
         return cls(
@@ -233,6 +244,7 @@ class TelemetryConsumer:
             topic=topic,
             autonomy_store=autonomy_store,
             autonomy_topic=autonomy_topic,
+            **security,
         )
 
     # -------------------------------------------------------------------------
@@ -325,9 +337,19 @@ class TelemetryConsumer:
 
     def _create_client(self) -> Any:
         """Create and configure a paho-mqtt client."""
+        from nomothetic.telemetry import apply_mqtt_security
+
         client = mqtt.Client(
             callback_api_version=CallbackAPIVersion.VERSION2,
             client_id="nomon-central-telemetry",
+        )
+        apply_mqtt_security(
+            client,
+            username=self.username,
+            password=self.password,
+            tls=self.tls,
+            ca_cert=self.ca_cert,
+            role="central consumer",
         )
         client.on_connect = self._on_connect
         client.on_message = self._on_message
