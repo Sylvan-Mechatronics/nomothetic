@@ -1,12 +1,21 @@
 version: 2
 # Keep GitHub Actions SHA pins and package dependencies current (review S-23).
+# Updates are grouped so a weekly run opens one Actions PR and one PR for
+# minor/patch package bumps; major package bumps still arrive one per PR so
+# they can be judged individually.
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
   - package-ecosystem: uv
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      uv-minor-patch:
+        update-types: ["minor", "patch"]
