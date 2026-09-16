@@ -184,6 +184,112 @@ Get the AP SSID suffix (`last4` of wlan0 MAC):
 cat /sys/class/net/wlan0/address | tr -d ':' | tr '[:upper:]' '[:lower:]' | grep -o '.\{4\}$'
 ```
 
+### 3.1 Sudo for deploys without a stored password (DRAFT)
+
+> **Draft, not yet applied or tested.** Goal: stop storing `NOMON_SUDO_PASS`
+> in plaintext `.env*` files on the dev machine.
+
+The deploy scripts need broad root access: they write units into
+`/etc/systemd/system`, install `/etc/sudoers.d` and polkit rules, run
+`apt-get`, and run venv Python as root. A sudoers allowlist that permits all
+of that is still root-equivalent, so pick one of these instead of pretending
+to scope the deploy:
+
+- **Option A: keep the sudo password, but don't store it.** Leave
+  `NOMON_SUDO_PASS` unset and enter it when deploying. `lib/common.sh` already
+  falls back to `ssh -t` plus an interactive `sudo` prompt when it is unset.
+  The per-repo `scripts/deploy.sh` files send their remote script over ssh
+  stdin, so a typed prompt probably won't work there without script changes.
+  Test that first. Add the scoped rule below so routine restarts don't need
+  the password.
+- **Option B: passwordless sudo for the deploy user.** Your Pi login is then
+  protected only by the SSH key, so require key-only SSH and a passphrase on
+  the key. That's no weaker than today: a password stored next to the SSH key
+  on the dev machine adds nothing once the dev machine is compromised.
+
+Check what is already there first. Some Raspberry Pi OS images ship
+`010_pi-nopasswd`:
+
+```bash
+sudo ls -l /etc/sudoers.d/
+command -v systemctl journalctl   # confirm paths used below (/usr/bin on Bookworm)
+```
+
+Read service logs through a group instead of sudo, for either option:
+
+```bash
+sudo usermod -aG systemd-journal "$USER"   # journalctl -u <unit> without sudo
+```
+
+#### Option A: scoped rule for routine service control
+
+Replace `DEPLOY_USER` with your Pi login user (`echo "$USER"`). Arguments are
+matched literally, so use the `.service` suffix when running these.
+
+```bash
+sudo visudo -f /etc/sudoers.d/nomon-service-control
+```
+
+```sudoers
+# /etc/sudoers.d/nomon-service-control
+# Passwordless start/stop/restart of nomon units only. Cannot create or
+# modify units, so this is not root-equivalent.
+Cmnd_Alias NOMON_SVC = \
+    /usr/bin/systemctl start   nomothetic-api.service, \
+    /usr/bin/systemctl stop    nomothetic-api.service, \
+    /usr/bin/systemctl restart nomothetic-api.service, \
+    /usr/bin/systemctl start   nomothetic-ap.service, \
+    /usr/bin/systemctl stop    nomothetic-ap.service, \
+    /usr/bin/systemctl restart nomothetic-ap.service, \
+    /usr/bin/systemctl start   nomothetic-stream.service, \
+    /usr/bin/systemctl stop    nomothetic-stream.service, \
+    /usr/bin/systemctl restart nomothetic-stream.service, \
+    /usr/bin/systemctl start   nomopractic.service, \
+    /usr/bin/systemctl stop    nomopractic.service, \
+    /usr/bin/systemctl restart nomopractic.service, \
+    /usr/bin/systemctl start   nomographic-local-db.service, \
+    /usr/bin/systemctl stop    nomographic-local-db.service, \
+    /usr/bin/systemctl restart nomographic-local-db.service
+
+DEPLOY_USER ALL=(root) NOPASSWD: NOMON_SVC
+```
+
+#### Option B: passwordless deploys
+
+```bash
+sudo visudo -f /etc/sudoers.d/nomon-deploy
+```
+
+```sudoers
+# /etc/sudoers.d/nomon-deploy
+# Root-equivalent by design: deploys install units, sudoers and polkit rules.
+DEPLOY_USER ALL=(ALL) NOPASSWD: ALL
+```
+
+Then disable SSH password logins so the key is the only way in:
+
+```bash
+printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' \
+  | sudo tee /etc/ssh/sshd_config.d/10-nomon-keys-only.conf
+sudo sshd -t && sudo systemctl reload ssh
+```
+
+Keep your current SSH session open and confirm a new key-based login works
+before closing it.
+
+#### Either option: verify, then remove the stored password
+
+```bash
+sudo visudo -c                      # all sudoers files parse
+sudo -l                             # shows the new rule
+```
+
+On the dev machine, delete the `NOMON_SUDO_PASS=` line from every env file that
+has it (`autonomon/.env.device`, `nomopractic/.env.device`,
+`nomothetic/.env.device`, `nomothetic/.env.central`, `nomographic/.env.local`),
+run one deploy to confirm, then change the Pi user's password (`passwd`),
+since the old one has been stored in plaintext.
+
 ---
 
 ## 4 - Configure Environment Files
