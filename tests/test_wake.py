@@ -153,8 +153,13 @@ class FakeAiService:
         self.fail = fail
         self.calls: list[list[dict]] = []
 
-    async def run_command(self, messages, api_key):
+    @property
+    def tool_names(self):
+        return ["stop", "drive", "steer", "read_ultrasonic", "start_routine", "list_routines"]
+
+    async def run_command(self, messages, api_key, allowed_tools=None):
         self.calls.append([dict(m) for m in messages])
+        self.allowed_tools = allowed_tools
         if self.fail is not None:
             raise self.fail
         return {"reply": self.reply, "actions": [], "model": "m", "stop_reason": "end_turn"}
@@ -675,13 +680,13 @@ def test_transcript_spoken_concurrently_with_dispatch(monkeypatch, tmp_path, bg_
             speak_started.set()
 
     class GatedAi(FakeAiService):
-        async def run_command(self, messages, api_key):
+        async def run_command(self, messages, api_key, allowed_tools=None):
             # Runs on the app loop while the listener thread is inside dispatch.
             # If the echo were sequential (spoken only after dispatch returns),
             # the event would never be set here and this wait returns False.
             loop = asyncio.get_running_loop()
             observed["overlap"] = await loop.run_in_executor(None, speak_started.wait, 2.0)
-            return await super().run_command(messages, api_key)
+            return await super().run_command(messages, api_key, allowed_tools)
 
     wake_rec = FakeRecognizer([("final", "hey nomon")])
     cmd_rec = FakeRecognizer([("final", "drive forward")])
@@ -1136,3 +1141,68 @@ def test_speak_async_starts_thread(monkeypatch, tmp_path):
     thread.join(timeout=3.0)
     assert not thread.is_alive()
     assert tts.calls == ["hi"]
+
+
+# ---------------------------------------------------------------------------
+# Voice motion gating (review S-11)
+# ---------------------------------------------------------------------------
+
+
+def _gating_listener(tmp_path, monkeypatch, *, mode, presence):
+    """Build a listener with a fake AI service and a fixed presence probe."""
+    monkeypatch.delenv("NOMON_WAKE_MOTION_TOOLS", raising=False)
+    ai = FakeAiService(reply="ok")
+    listener = _make_listener(
+        FakeEngine(FakeRecognizer([]), FakeRecognizer([])),
+        tmp_path,
+        ai=ai,
+        motion_tools=mode,
+        owner_presence_s=lambda: presence,
+        presence_window_s=300.0,
+    )
+    return listener, ai
+
+
+def test_motion_tools_default_is_presence(tmp_path, monkeypatch):
+    monkeypatch.delenv("NOMON_WAKE_MOTION_TOOLS", raising=False)
+    listener = _make_listener(FakeEngine(FakeRecognizer([]), FakeRecognizer([])), tmp_path)
+    assert listener.motion_tools_mode == "presence"
+    # No presence probe wired at all → motion is never allowed.
+    assert listener.motion_allowed() is False
+
+
+@pytest.mark.parametrize(
+    ("mode", "presence", "allowed"),
+    [
+        ("presence", 10.0, True),
+        ("presence", 900.0, False),
+        ("presence", None, False),
+        ("never", 1.0, False),
+        ("always", None, True),
+    ],
+)
+def test_motion_allowed_by_mode_and_presence(tmp_path, monkeypatch, mode, presence, allowed):
+    listener, _ = _gating_listener(tmp_path, monkeypatch, mode=mode, presence=presence)
+    assert listener.motion_allowed() is allowed
+
+
+def test_allowed_tools_excludes_motion_when_owner_absent(tmp_path, monkeypatch):
+    listener, ai = _gating_listener(tmp_path, monkeypatch, mode="presence", presence=None)
+    allowed = listener.allowed_tools()
+    assert allowed is not None
+    assert "drive" not in allowed and "steer" not in allowed and "start_routine" not in allowed
+    assert "stop" in allowed and "read_ultrasonic" in allowed
+
+
+def test_allowed_tools_unrestricted_when_owner_present(tmp_path, monkeypatch):
+    listener, _ = _gating_listener(tmp_path, monkeypatch, mode="presence", presence=5.0)
+    assert listener.allowed_tools() is None
+
+
+def test_env_mode_is_read(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOMON_WAKE_MOTION_TOOLS", "never")
+    listener = _make_listener(FakeEngine(FakeRecognizer([]), FakeRecognizer([])), tmp_path)
+    assert listener.motion_tools_mode == "never"
+    monkeypatch.setenv("NOMON_WAKE_MOTION_TOOLS", "bogus")
+    listener = _make_listener(FakeEngine(FakeRecognizer([]), FakeRecognizer([])), tmp_path)
+    assert listener.motion_tools_mode == "presence"

@@ -45,11 +45,11 @@ import threading
 import time
 import wave
 from array import array
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from nomothetic.ai_command import AiProviderError, AiUnavailableError
+from nomothetic.ai_command import MOTION_TOOLS, AiProviderError, AiUnavailableError
 from nomothetic.audio import (
     DEFAULT_DEVICE_NAME_MATCH,
     env_device_index,
@@ -154,7 +154,17 @@ class RecognizerProvider(Protocol):
 class CommandRunner(Protocol):
     """Runs one chat command through the AI tool loop (AiCommandService)."""
 
-    async def run_command(self, messages: list[dict[str, Any]], api_key: str) -> dict[str, Any]:
+    @property
+    def tool_names(self) -> list[str]:
+        """Names of the registered tools (used to build the voice allow-list)."""
+        ...  # pragma: no cover - protocol definition
+
+    async def run_command(
+        self,
+        messages: list[dict[str, Any]],
+        api_key: str,
+        allowed_tools: Collection[str] | None = None,
+    ) -> dict[str, Any]:
         """Return ``{reply, actions, model, stop_reason}``."""
         ...  # pragma: no cover - protocol definition
 
@@ -576,9 +586,27 @@ class WakeWordListener:
         chime_volume_pct: int | None = None,
         rms_threshold: int | None = None,
         tts_engine: SpeechSynthesizer | None = None,
+        owner_presence_s: Callable[[], float | None] | None = None,
+        motion_tools: str | None = None,
+        presence_window_s: float | None = None,
     ) -> None:
         self._stt_engine = stt_engine
         self._ai_service = ai_service
+        # Review S-11: voice is an unauthenticated channel (anyone in earshot).
+        # Motion tools (drive/steer/start_routine) are offered to the model only
+        # per NOMON_WAKE_MOTION_TOOLS: "presence" (default) = only while the
+        # owner's app has contacted the device within presence_window_s,
+        # "never" = never, "always" = unrestricted (trusted environments only).
+        self._owner_presence_s = owner_presence_s
+        mode = (motion_tools or os.environ.get("NOMON_WAKE_MOTION_TOOLS", "presence")).strip()
+        self._motion_tools = (
+            mode.lower() if mode.lower() in ("presence", "never", "always") else "presence"
+        )
+        self._presence_window_s = (
+            presence_window_s
+            if presence_window_s is not None
+            else float(os.environ.get("NOMON_WAKE_PRESENCE_WINDOW_S", "300"))
+        )
         self._ai_key_store = ai_key_store
         self._get_player = get_player
         self._get_hat = get_hat
@@ -1152,6 +1180,28 @@ class WakeWordListener:
             history = _trim_history(history)
             timeout_s = self._followup_window_s
 
+    @property
+    def motion_tools_mode(self) -> str:
+        """``"presence"``, ``"never"``, or ``"always"`` (review S-11)."""
+        return self._motion_tools
+
+    def motion_allowed(self) -> bool:
+        """Whether a voice command may currently use motion tools."""
+        if self._motion_tools == "always":
+            return True
+        if self._motion_tools == "never":
+            return False
+        if self._owner_presence_s is None:
+            return False
+        age = self._owner_presence_s()
+        return age is not None and age <= self._presence_window_s
+
+    def allowed_tools(self) -> frozenset[str] | None:
+        """Tool allow-list for the next voice command, or ``None`` for unrestricted."""
+        if self.motion_allowed():
+            return None
+        return frozenset(self._ai_service.tool_names) - MOTION_TOOLS
+
     def _dispatch(self, messages: list[dict[str, str]]) -> str | None:
         """Run the conversation through the AI service on the app's event loop.
 
@@ -1168,9 +1218,12 @@ class WakeWordListener:
             logger.warning("wake command dropped: event loop unavailable")
             return None
         payload: list[dict[str, Any]] = [dict(message) for message in messages]
-        future = asyncio.run_coroutine_threadsafe(
-            self._ai_service.run_command(payload, api_key=api_key), loop
-        )
+        allowed = self.allowed_tools()
+        if allowed is None:
+            coro = self._ai_service.run_command(payload, api_key=api_key)
+        else:
+            coro = self._ai_service.run_command(payload, api_key=api_key, allowed_tools=allowed)
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
         try:
             result = future.result(timeout=self._ai_timeout_s)
         except TimeoutError:

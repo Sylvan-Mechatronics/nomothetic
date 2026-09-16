@@ -180,7 +180,7 @@ if [[ -n "${PI_HOST}" ]]; then
     _VERSION_QUOTED="$(printf '%q' "${VERSION}")"
     _DEPLOY_LOCAL_QUOTED="$(printf '%q' "${DEPLOY_LOCAL}")"
     _REMOTE_DIR_QUOTED="$(printf '%q' "${NOMON_REMOTE_DIR:-}")"
-    RUN_CMD=(ssh "${SSH_OPTS[@]}" "${PI_HOST}" "NOMON_SKIP_TESTS=${SKIP_TESTS} NOMON_SUDO_PASS=${_NOMON_SUDO_PASS_QUOTED} NOMON_DEPLOY_VERSION=${_VERSION_QUOTED} NOMON_DEPLOY_LOCAL=${_DEPLOY_LOCAL_QUOTED} NOMON_DEPLOY_REMOTE_DIR=${_REMOTE_DIR_QUOTED} bash -ls")
+    RUN_CMD=(ssh "${SSH_OPTS[@]}" "${PI_HOST}" "NOMON_SKIP_TESTS=${SKIP_TESTS} NOMON_DEPLOY_VERSION=${_VERSION_QUOTED} NOMON_DEPLOY_LOCAL=${_DEPLOY_LOCAL_QUOTED} NOMON_DEPLOY_REMOTE_DIR=${_REMOTE_DIR_QUOTED} bash -ls")
 else
     echo "==> Deploying nomothetic${VERSION:+ ${VERSION}} locally"
     export NOMON_SKIP_TESTS="${SKIP_TESTS}"
@@ -236,7 +236,11 @@ copy_nomothetic_env() {
         remote_env_tmp="/tmp/nomothetic_env.${RANDOM}.$$"
         printf '%s\n' "${filtered}" > "${tmp_env_file}"
         scp "${SSH_OPTS[@]}" "${tmp_env_file}" "${PI_HOST}:${remote_env_tmp}"
-        ssh "${SSH_OPTS[@]}" "${PI_HOST}" "NOMON_SUDO_PASS=${_NOMON_SUDO_PASS_QUOTED} REMOTE_ENV_TMP=${remote_env_tmp} bash -s" <<'EO_NOMOTHETIC_ENV'
+        # The sudo password travels on stdin (first line of the remote script),
+        # never on the ssh command line where `ps` would show it (review S-9).
+        {
+        printf 'NOMON_SUDO_PASS=%s\n' "${_NOMON_SUDO_PASS_QUOTED}"
+        cat <<'EO_NOMOTHETIC_ENV'
 set -euo pipefail
 if [[ -n "${NOMON_SUDO_PASS:-}" ]]; then
     _askpass_script="$(mktemp)"
@@ -255,6 +259,7 @@ sudo mkdir -p /etc/nomothetic
 sudo mv -f "${REMOTE_ENV_TMP}" /etc/nomothetic/nomothetic.env
 sudo chmod 644 /etc/nomothetic/nomothetic.env
 EO_NOMOTHETIC_ENV
+        } | ssh "${SSH_OPTS[@]}" "${PI_HOST}" "REMOTE_ENV_TMP=${remote_env_tmp} bash -s"
         rm -f "${tmp_env_file}"
     else
         echo "==> Writing /etc/nomothetic/nomothetic.env locally..."
@@ -305,7 +310,11 @@ copy_nomothetic_env
 # ── Deployment ─────────────────────────────────────────────────────────────────
 # All steps below run on the Pi (remote or local) via a single shell session.
 
-"${RUN_CMD[@]}" << 'END_REMOTE'
+# The sudo password is prepended to the remote script on stdin instead of
+# being placed in the ssh argv, so it never appears in `ps` (review S-9).
+_remote_script() {
+    printf 'NOMON_SUDO_PASS=%s\n' "${_NOMON_SUDO_PASS_QUOTED}"
+    cat <<'END_REMOTE'
 set -euo pipefail
 
 if [[ -n "${NOMON_SUDO_PASS:-}" ]]; then
@@ -767,3 +776,5 @@ if [[ "${DEPLOY_LOCAL}" != "true" ]]; then
     done
 fi
 END_REMOTE
+}
+_remote_script | "${RUN_CMD[@]}"

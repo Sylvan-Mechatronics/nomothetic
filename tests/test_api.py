@@ -1408,8 +1408,9 @@ def test_start_stream_success(client, mock_camera):
         response = client.post("/api/stream/start", json={})
         # Verify the existing camera instance is passed to avoid resource
         # conflicts, and that the server is armed with an access token (P10).
+        # Loopback by default (review S-8): viewers use the TLS relay.
         MockStreamServer.assert_called_once_with(
-            host="0.0.0.0", port=8000, camera=mock_camera, access_token=ANY
+            host="127.0.0.1", port=8000, camera=mock_camera, access_token=ANY
         )
 
     assert response.status_code == 200
@@ -1428,6 +1429,36 @@ def test_start_stream_success(client, mock_camera):
 
     # Cleanup
     nomothetic.api._camera = None
+    nomothetic.api._stream_server = None
+
+
+def test_start_stream_coerces_remote_bind_to_loopback(client, mock_camera, monkeypatch):
+    """A non-loopback host is ignored unless NOMON_STREAM_ALLOW_REMOTE_BIND is set (S-8)."""
+    from unittest.mock import ANY, MagicMock, patch
+
+    import nomothetic.api
+
+    monkeypatch.delenv("NOMON_STREAM_ALLOW_REMOTE_BIND", raising=False)
+    mock_server = MagicMock()
+    mock_server.host = "127.0.0.1"
+    mock_server.port = 8000
+    nomothetic.api._camera = mock_camera
+    nomothetic.api._stream_server = None
+
+    with patch("nomothetic.api.StreamServer", return_value=mock_server) as MockStreamServer:
+        response = client.post("/api/stream/start", json={"host": "0.0.0.0"})
+        MockStreamServer.assert_called_once_with(
+            host="127.0.0.1", port=8000, camera=mock_camera, access_token=ANY
+        )
+    assert response.status_code == 200
+    nomothetic.api._stream_server = None
+
+    monkeypatch.setenv("NOMON_STREAM_ALLOW_REMOTE_BIND", "1")
+    with patch("nomothetic.api.StreamServer", return_value=mock_server) as MockStreamServer:
+        client.post("/api/stream/start", json={"host": "0.0.0.0"})
+        MockStreamServer.assert_called_once_with(
+            host="0.0.0.0", port=8000, camera=mock_camera, access_token=ANY
+        )
     nomothetic.api._stream_server = None
     nomothetic.api._stream_token = None
 

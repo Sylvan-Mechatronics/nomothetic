@@ -108,6 +108,23 @@ def catalog_from_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def published_params_schema(path: Path | None = None) -> dict[str, Any]:
+    """Return the published ``params_schema`` mapping, or ``{}`` when unavailable.
+
+    Used to allow-list routine params before they reach the brain (review S-10).
+
+    Parameters
+    ----------
+    path : pathlib.Path, optional
+        Catalogue file to read; defaults to :func:`catalog_path`.
+    """
+    data = _load_catalog_file(path)
+    if data is None:
+        return {}
+    schema = data.get("params_schema", {})
+    return dict(schema) if isinstance(schema, Mapping) else {}
+
+
 def published_autonomon_bin(path: Path | None = None) -> str | None:
     """Return the ``nomon-autonomon`` path the published catalogue advertises.
 

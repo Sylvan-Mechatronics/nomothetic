@@ -10,7 +10,10 @@ from nomothetic.pairing import (
     PairingState,
     _read_shared_secret,
     _write_shared_secret,
+    generate_ap_passphrase,
+    get_ap_passphrase_path,
     get_pairing_secret_path,
+    is_valid_ap_passphrase,
 )
 
 # ============================================================================
@@ -528,3 +531,136 @@ def test_jwt_store_never_overwrites_unreadable_file(tmp_path):
     finally:
         jwt_path.chmod(0o600)
     assert jwt_path.read_text() == "x" * 64
+
+
+# ============================================================================
+# Soft AP passphrase — independent of the 8-digit pairing code (review S-1)
+# ============================================================================
+
+
+def test_ap_passphrase_is_long_and_wpa2_safe():
+    """The AP passphrase is a long random WPA2-safe string, not the pairing code."""
+    value = generate_ap_passphrase()
+    assert len(value) == 20
+    assert is_valid_ap_passphrase(value)
+    assert not value.isdigit()
+    for ambiguous in "0O1lI":
+        assert ambiguous not in value
+
+
+def test_ap_passphrase_unique():
+    assert generate_ap_passphrase() != generate_ap_passphrase()
+
+
+@pytest.mark.parametrize(
+    ("value", "ok"),
+    [
+        ("12345678", True),
+        ("1234567", False),
+        ("x" * 63, True),
+        ("x" * 64, False),
+        ("has\ttab", False),
+        ("héllo-wörld", False),
+    ],
+)
+def test_is_valid_ap_passphrase(value, ok):
+    assert is_valid_ap_passphrase(value) is ok
+
+
+def test_get_ap_passphrase_path_default():
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("NOMON_AP_PASSPHRASE_PATH", None)
+        assert get_ap_passphrase_path() == "/var/lib/nomon/ap_passphrase"
+
+
+def test_get_ap_passphrase_path_from_env():
+    with patch.dict(os.environ, {"NOMON_AP_PASSPHRASE_PATH": "/tmp/x/ap"}):
+        assert get_ap_passphrase_path() == "/tmp/x/ap"
+
+
+def test_ap_passphrase_differs_from_pairing_secret(tmp_path):
+    secret_path = str(tmp_path / "pairing_secret")
+    ap_path = str(tmp_path / "ap_passphrase")
+    with patch.dict(
+        os.environ,
+        {"NOMON_PAIRING_SECRET_PATH": secret_path, "NOMON_AP_PASSPHRASE_PATH": ap_path},
+    ):
+        ps = PairingState()
+        code = ps.load_or_generate_secret()
+        passphrase = ps.load_or_generate_ap_passphrase()
+    assert code != passphrase
+    assert len(code) == 8 and code.isdigit()
+    assert len(passphrase) == 20
+
+
+def test_load_or_generate_ap_passphrase_creates_file_0640(tmp_path):
+    ap_path = str(tmp_path / "ap_passphrase")
+    with patch.dict(os.environ, {"NOMON_AP_PASSPHRASE_PATH": ap_path}):
+        ps = PairingState()
+        value = ps.load_or_generate_ap_passphrase()
+    assert ps.ap_passphrase == value
+    with open(ap_path) as fh:
+        assert fh.read() == value
+    assert stat.S_IMODE(os.stat(ap_path).st_mode) == 0o640
+
+
+def test_load_or_generate_ap_passphrase_loads_existing(tmp_path):
+    ap_path = tmp_path / "ap_passphrase"
+    ap_path.write_text("StableHotspotPass42\n")
+    with patch.dict(os.environ, {"NOMON_AP_PASSPHRASE_PATH": str(ap_path)}):
+        ps = PairingState()
+        assert ps.load_or_generate_ap_passphrase() == "StableHotspotPass42"
+    assert ap_path.read_text() == "StableHotspotPass42\n"
+
+
+def test_load_or_generate_ap_passphrase_replaces_invalid(tmp_path):
+    """A stored value that is not a valid WPA2 PSK (e.g. a legacy 8-digit code
+    accidentally copied here, or too short) is regenerated."""
+    ap_path = tmp_path / "ap_passphrase"
+    ap_path.write_text("short")
+    with patch.dict(os.environ, {"NOMON_AP_PASSPHRASE_PATH": str(ap_path)}):
+        ps = PairingState()
+        value = ps.load_or_generate_ap_passphrase()
+    assert value != "short"
+    assert ap_path.read_text() == value
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="chmod 000 does not block root")
+def test_load_or_generate_ap_passphrase_never_overwrites_unreadable(tmp_path):
+    ap_path = tmp_path / "ap_passphrase"
+    ap_path.write_text("KeepMeHotspotPass99")
+    os.chmod(ap_path, 0)
+    try:
+        with patch.dict(os.environ, {"NOMON_AP_PASSPHRASE_PATH": str(ap_path)}):
+            ps = PairingState()
+            value = ps.load_or_generate_ap_passphrase()
+        assert is_valid_ap_passphrase(value)
+    finally:
+        os.chmod(ap_path, 0o600)
+    assert ap_path.read_text() == "KeepMeHotspotPass99"
+
+
+def test_reset_deletes_ap_passphrase_file(tmp_path):
+    secret_path = str(tmp_path / "pairing_secret")
+    ap_path = str(tmp_path / "ap_passphrase")
+    with patch.dict(
+        os.environ,
+        {"NOMON_PAIRING_SECRET_PATH": secret_path, "NOMON_AP_PASSPHRASE_PATH": ap_path},
+    ):
+        ps = PairingState()
+        ps.generate_secret()
+        ps.load_or_generate_ap_passphrase()
+        assert os.path.exists(ap_path)
+        ps.reset()
+    assert not os.path.exists(ap_path)
+    assert ps.ap_passphrase is None
+
+
+def test_reset_session_keeps_ap_passphrase(tmp_path):
+    ap_path = str(tmp_path / "ap_passphrase")
+    with patch.dict(os.environ, {"NOMON_AP_PASSPHRASE_PATH": ap_path}):
+        ps = PairingState()
+        value = ps.load_or_generate_ap_passphrase()
+        ps.reset_session()
+    assert os.path.exists(ap_path)
+    assert ps.ap_passphrase == value

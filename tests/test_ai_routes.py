@@ -34,7 +34,7 @@ class FakeAiService:
         self.fail: Exception | None = None
         self.calls: list[tuple[list, str]] = []
 
-    async def run_command(self, messages, api_key):
+    async def run_command(self, messages, api_key, allowed_tools=None):
         self.calls.append((messages, api_key))
         if self.fail is not None:
             raise self.fail

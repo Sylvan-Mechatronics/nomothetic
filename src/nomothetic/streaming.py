@@ -393,7 +393,9 @@ class StreamServer:
             self._httpd.shutdown()
             self._httpd = None
         thread = getattr(self, "_thread", None)
-        if thread is not None and thread.is_alive():
+        # start()'s finally also calls close() from the server thread itself
+        # once serve_forever() returns — a thread cannot join itself.
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=5.0)
         if self._owns_camera:
             self.camera.close()

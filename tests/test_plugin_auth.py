@@ -261,6 +261,36 @@ def test_register_conflict_returns_409(plugin_client):
     assert resp.status_code == 409
 
 
+def test_challenge_from_remote_forbidden_by_default(remote_client, monkeypatch):
+    """challenge/token are localhost-only unless remote plugin auth is enabled (S-12)."""
+    monkeypatch.delenv("NOMON_PLUGIN_AUTH_ALLOW_REMOTE", raising=False)
+    client, _ = remote_client
+    assert client.get("/api/plugin/challenge", params={"plugin": "autonomon"}).status_code == 403
+    resp = client.post(
+        "/api/plugin/token", json={"plugin": "autonomon", "nonce": "x", "signature": "eA=="}
+    )
+    assert resp.status_code == 403
+
+
+def test_challenge_from_remote_allowed_when_enabled(remote_client, monkeypatch):
+    monkeypatch.setenv("NOMON_PLUGIN_AUTH_ALLOW_REMOTE", "1")
+    client, _ = remote_client
+    # Passes the loopback gate; 404 because nothing is registered.
+    assert client.get("/api/plugin/challenge", params={"plugin": "autonomon"}).status_code == 404
+
+
+def test_plugin_auth_endpoints_rate_limited(plugin_client):
+    client, _ = plugin_client
+    _, pem = _keypair()
+    _register(client, "autonomon", pem)
+    codes = [
+        client.get("/api/plugin/challenge", params={"plugin": "autonomon"}).status_code
+        for _ in range(31)
+    ]
+    assert codes[:30] == [200] * 30
+    assert codes[30] == 429
+
+
 def test_challenge_unregistered_404(plugin_client):
     client, _ = plugin_client
     resp = client.get("/api/plugin/challenge", params={"plugin": "autonomon"})
@@ -286,11 +316,31 @@ def test_full_token_flow_grants_device_access(plugin_client):
     assert access_token
     assert body["timestamp"]  # all REST responses carry a UTC timestamp
 
-    # The plugin token must authenticate against jwt_required-protected routes.
-    # /me passes auth (sub="plugin:autonomon") then 404s on user lookup — a 404
-    # (not 401) proves the token authenticated successfully.
-    me = client.get("/api/device/auth/me", headers={"Authorization": f"Bearer {access_token}"})
-    assert me.status_code == 404
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    # The plugin token authenticates, but is *plugin*-scoped (review S-2): raw
+    # I/O routes pass auth (here 503 — no HAT in tests — proves we got past the
+    # 401/403 gate), while owner-only and control routes are refused with 403.
+    ultrasonic = client.get("/api/sensor/ultrasonic", headers=headers)
+    assert ultrasonic.status_code not in (401, 403)
+    drive = client.post("/api/drive", json={"speed_pct": 10}, headers=headers)
+    assert drive.status_code not in (401, 403)
+    events = client.post("/api/routines/explore/events", json={"type": "starting"}, headers=headers)
+    assert events.status_code == 200
+
+    assert client.get("/api/device/auth/me", headers=headers).status_code == 403
+    assert client.delete("/api/device/auth/session", headers=headers).status_code == 403
+    assert client.get("/api/device/auth/identity", headers=headers).status_code == 403
+    assert (
+        client.post("/api/routines/start", json={"routine": "explore"}, headers=headers).status_code
+        == 403
+    )
+    assert client.post("/api/routines/stop-all", headers=headers).status_code == 403
+    assert client.get("/api/ai/key", headers=headers).status_code == 403
+    assert (
+        client.post("/api/device/wifi/ap", json={"enabled": True}, headers=headers).status_code
+        == 403
+    )
 
 
 def test_token_bad_signature_rejected(plugin_client):
@@ -335,3 +385,117 @@ def test_token_unregistered_plugin_rejected(plugin_client):
         json={"plugin": "ghost", "nonce": "forged", "signature": _sign(priv, "forged")},
     )
     assert tok.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Token scope (review finding S-2)
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_token_carries_plugin_scope():
+    from nomothetic.auth import SCOPE_OWNER, SCOPE_PLUGIN, AuthService
+
+    svc = AuthService(secret="x" * 32)
+    plugin = svc.verify_token(svc.create_plugin_token("autonomon"))
+    assert plugin.scope == SCOPE_PLUGIN
+    assert plugin.sub == "plugin:autonomon"
+    owner = svc.verify_token(svc.create_access_token("owner@local"))
+    assert owner.scope == SCOPE_OWNER
+
+
+def test_scope_inferred_for_legacy_tokens_without_claim():
+    """A pre-scope plugin token must not be upgraded to owner on deploy."""
+    from datetime import datetime, timedelta, timezone
+
+    from authlib.jose import JsonWebToken
+
+    from nomothetic.auth import SCOPE_OWNER, SCOPE_PLUGIN, AuthService
+
+    secret = "y" * 32
+    svc = AuthService(secret=secret)
+    now = datetime.now(timezone.utc)
+    jwt = JsonWebToken(["HS256"])
+
+    def mint(sub: str) -> str:
+        payload = {
+            "sub": sub,
+            "iat": int(now.timestamp()),
+            "exp": int((now + timedelta(minutes=5)).timestamp()),
+            "iss": "nomon-central",
+        }
+        tok = jwt.encode({"alg": "HS256"}, payload, secret)
+        return tok.decode() if isinstance(tok, bytes) else tok
+
+    assert svc.verify_token(mint("plugin:autonomon")).scope == SCOPE_PLUGIN
+    assert svc.verify_token(mint("owner@local")).scope == SCOPE_OWNER
+
+
+def test_unknown_scope_rejected():
+    from datetime import datetime, timedelta, timezone
+
+    from authlib.jose import JsonWebToken
+
+    from nomothetic.auth import AuthService
+
+    secret = "z" * 32
+    svc = AuthService(secret=secret)
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": "owner@local",
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=5)).timestamp()),
+        "iss": "nomon-central",
+        "scope": "admin",
+    }
+    tok = JsonWebToken(["HS256"]).encode({"alg": "HS256"}, payload, secret)
+    tok = tok.decode() if isinstance(tok, bytes) else tok
+    with pytest.raises(ValueError):
+        svc.verify_token(tok)
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "allowed"),
+    [
+        ("GET", "/api/sensor/ultrasonic", True),
+        ("GET", "/api/sensor/grayscale/normalized", True),
+        ("GET", "/api/hat/battery", True),
+        ("GET", "/api/camera/frame", True),
+        ("POST", "/api/drive", True),
+        ("POST", "/api/steer", True),
+        ("POST", "/api/hat/motor/stop", True),
+        ("POST", "/api/camera/pan", True),
+        ("POST", "/api/camera/tilt", True),
+        ("POST", "/api/routines/explore/events", True),
+        ("POST", "/api/routines/explore/events/", True),
+        ("POST", "/api/routines/start", False),
+        ("POST", "/api/routines/stop", False),
+        ("POST", "/api/routines/heartbeat", False),
+        ("GET", "/api/routines/explore/logs", False),
+        ("POST", "/api/routines//events", False),
+        ("POST", "/api/sensor/ultrasonic", False),
+        ("GET", "/api/drive", False),
+        ("POST", "/api/hat/motor/0", False),
+        ("POST", "/api/hat/reset", False),
+        ("PUT", "/api/ai/key", False),
+        ("POST", "/api/device/network/configure", False),
+        ("DELETE", "/api/device/auth/session", False),
+    ],
+)
+def test_plugin_allow_list(method, path, allowed):
+    from nomothetic.auth import _plugin_may_call
+
+    assert _plugin_may_call(method, path) is allowed
+
+
+def test_owner_token_unaffected_by_scope_gate(plugin_client):
+    """An owner token still reaches control routes on the device router."""
+    from nomothetic.auth import get_auth_service
+
+    client, _ = plugin_client
+    svc = get_auth_service()
+    assert svc is not None
+    headers = {"Authorization": f"Bearer {svc.create_access_token('owner@local')}"}
+    # 503 (routine manager has no credentials in tests) proves the gate passed.
+    resp = client.post("/api/routines/start", json={"routine": "explore"}, headers=headers)
+    assert resp.status_code not in (401, 403)
+    assert client.get("/api/ai/key", headers=headers).status_code not in (401, 403)

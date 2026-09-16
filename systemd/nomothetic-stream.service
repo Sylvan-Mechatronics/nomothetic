@@ -20,6 +20,18 @@ WorkingDirectory=${NOMON_INSTALL_DIR}
 # unit but never enables it (see scripts/deploy.sh).
 ExecStart=${NOMON_INSTALL_DIR}/.venv/bin/python -c "from nomothetic.streaming import StreamServer; StreamServer(host='0.0.0.0', port=8000).start()"
 
+# Sandboxing (review finding S-17). NoNewPrivileges is deliberately absent: the
+# service calls sudo for the scoped ap-mode.sh systemctl rule. /var/lib/nomon,
+# /run/nomothetic and the media dir stay writable; /usr, /boot, /etc are not.
+ProtectSystem=full
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictSUIDSGID=true
+
 Restart=on-failure
 RestartSec=5s
 

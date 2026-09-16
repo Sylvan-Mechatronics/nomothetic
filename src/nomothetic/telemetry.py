@@ -27,6 +27,82 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+def mqtt_security_from_env() -> dict[str, Any]:
+    """Read the shared MQTT credential/TLS settings from the environment.
+
+    Environment variables (review finding S-4 — the broker link was plaintext
+    and unauthenticated by default):
+
+    ``NOMON_MQTT_USERNAME`` / ``NOMON_MQTT_PASSWORD``
+        Broker credentials (both required to enable auth).
+    ``NOMON_MQTT_TLS``
+        ``1``/``true`` to connect over TLS using the system CA bundle.
+    ``NOMON_MQTT_CA_CERT``
+        Path to a CA certificate for a private broker CA (implies TLS).
+
+    Returns
+    -------
+    dict
+        ``{"username", "password", "tls", "ca_cert"}`` suitable for the
+        keyword arguments of the three MQTT client classes.
+    """
+    username = os.environ.get("NOMON_MQTT_USERNAME", "").strip() or None
+    password = os.environ.get("NOMON_MQTT_PASSWORD", "") or None
+    ca_cert = os.environ.get("NOMON_MQTT_CA_CERT", "").strip() or None
+    tls = os.environ.get("NOMON_MQTT_TLS", "").strip().lower() in ("1", "true", "yes")
+    return {
+        "username": username,
+        "password": password,
+        "tls": tls or ca_cert is not None,
+        "ca_cert": ca_cert,
+    }
+
+
+def mqtt_port_from_env(tls: bool) -> int:
+    """Return ``NOMON_MQTT_PORT``, defaulting to 8883 under TLS and 1883 otherwise."""
+    raw = os.environ.get("NOMON_MQTT_PORT", "").strip()
+    if raw:
+        return int(raw)
+    return 8883 if tls else 1883
+
+
+def apply_mqtt_security(
+    client: Any,
+    *,
+    username: Optional[str],
+    password: Optional[str],
+    tls: bool,
+    ca_cert: Optional[str],
+    role: str,
+) -> None:
+    """Configure credentials and TLS on a paho client; warn when neither is set.
+
+    Parameters
+    ----------
+    client : paho.mqtt.client.Client
+        The client to configure (before ``connect``).
+    username, password : str or None
+        Broker credentials; applied when *username* is set.
+    tls : bool
+        Enable TLS (system CA bundle unless *ca_cert* is given).
+    ca_cert : str or None
+        Private CA certificate path.
+    role : str
+        Label for the warning log (``"telemetry"``, ``"autonomy"``, ...).
+    """
+    if username:
+        client.username_pw_set(username, password)
+    if tls:
+        client.tls_set(ca_certs=ca_cert) if ca_cert else client.tls_set()
+    if not username and not tls:
+        logger.warning(
+            "MQTT %s link is unauthenticated and cleartext; set NOMON_MQTT_USERNAME/"
+            "NOMON_MQTT_PASSWORD and NOMON_MQTT_TLS (review finding S-4)",
+            role,
+        )
+
+
 _BACKOFF_BASE: float = 1.0
 _BACKOFF_CAP: float = 60.0
 
@@ -90,6 +166,10 @@ class TelemetryPublisher:
         hat_client: Optional[Any] = None,
         interval: float = 30.0,
         qos: int = 1,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        tls: bool = False,
+        ca_cert: Optional[str] = None,
     ) -> None:
         if mqtt is None:
             raise ImportError(
@@ -105,6 +185,10 @@ class TelemetryPublisher:
         self.hat_client = hat_client
         self.interval = interval
         self.qos = qos
+        self.username = username
+        self.password = password
+        self.tls = tls
+        self.ca_cert = ca_cert
 
         self._stop_event: threading.Event = threading.Event()
         self._connected: bool = False
@@ -159,7 +243,8 @@ class TelemetryPublisher:
         if not broker:
             raise ValueError("NOMON_MQTT_BROKER environment variable is required for telemetry.")
 
-        port = int(os.environ.get("NOMON_MQTT_PORT", "1883"))
+        security = mqtt_security_from_env()
+        port = mqtt_port_from_env(security["tls"])
         topic = os.environ.get("NOMON_MQTT_TOPIC", "nomon/telemetry")
         interval = float(os.environ.get("NOMON_MQTT_INTERVAL", "30.0"))
         device_id = os.environ.get("NOMON_DEVICE_ID") or None
@@ -180,6 +265,7 @@ class TelemetryPublisher:
             camera=camera,
             hat_client=hat_client,
             interval=interval,
+            **security,
         )
 
     # -------------------------------------------------------------------------
@@ -361,6 +447,14 @@ class TelemetryPublisher:
         client = mqtt.Client(
             callback_api_version=CallbackAPIVersion.VERSION2,
             client_id=f"nomon-{self.device_id}",
+        )
+        apply_mqtt_security(
+            client,
+            username=self.username,
+            password=self.password,
+            tls=self.tls,
+            ca_cert=self.ca_cert,
+            role="telemetry",
         )
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect

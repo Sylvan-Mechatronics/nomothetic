@@ -8,6 +8,7 @@ in the OpenAPI docs.
 import base64
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -17,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from nomothetic.auth import TokenPayload, jwt_required
 from nomothetic.autonomy_store import AutonomyEventItem, AutonomyRunItem, AutonomyStore
+from nomothetic.device_identity import verify_registration_proof
 from nomothetic.fleet_store import DeviceItem, FleetStore
 from nomothetic.rate_limit import register_rate_limit
 from nomothetic.telemetry_store import TelemetryReadingItem, TelemetryStore
@@ -39,6 +41,14 @@ class DeviceRegisterRequest(BaseModel):
         description=(
             "Short-lived proof token from GET /api/device/auth/identity. "
             "Binds this registration request to recent device access."
+        ),
+    )
+    device_public_key: Optional[str] = Field(
+        default=None,
+        max_length=4096,
+        description=(
+            "PEM public key from GET /api/device/auth/identity. The proof signature "
+            "is verified against it and it is pinned to the VIN on first registration."
         ),
     )
 
@@ -169,6 +179,20 @@ def _validate_registration_proof(proof: str, vin: str) -> bool:
         return False
 
 
+def _require_device_key() -> bool:
+    """Whether registrations without a verifiable device key are refused.
+
+    ``NOMON_FLEET_REQUIRE_DEVICE_KEY=1`` turns the legacy structural check off
+    entirely; until every device runs a build that publishes its identity key,
+    the default keeps the legacy path (logged) for keyless requests.
+    """
+    return os.environ.get("NOMON_FLEET_REQUIRE_DEVICE_KEY", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 # Module-level stores (set by create_app).
 _fleet_store: Optional[FleetStore] = None
 _telemetry_store: Optional[TelemetryStore] = None
@@ -256,7 +280,28 @@ def create_fleet_router() -> APIRouter:
             409 if the device is already registered.
             429 if the rate limit is exceeded.
         """
-        if not _validate_registration_proof(request.registration_proof, request.vin):
+        store = _require_store()
+        # Review S-3: verify the proof against the device's Ed25519 key. A key
+        # already pinned to this VIN always wins over one supplied in the
+        # request, so a second party cannot re-register a known device with a
+        # key of their own.
+        pinned = await store.get_device_public_key(request.vin)
+        key = pinned or request.device_public_key
+        if key is not None:
+            if not verify_registration_proof(request.registration_proof, request.vin, key):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "Registration proof does not verify against the device's identity "
+                        "key. Fetch a fresh proof from the device and retry."
+                    ),
+                )
+        elif _require_device_key():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="device_public_key is required to register a device",
+            )
+        elif not _validate_registration_proof(request.registration_proof, request.vin):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
@@ -264,9 +309,16 @@ def create_fleet_router() -> APIRouter:
                     "Fetch a fresh proof from the device and retry."
                 ),
             )
-        store = _require_store()
+        else:
+            logger.warning(
+                "register_device: VIN %s registered with an unverifiable legacy proof "
+                "(no device_public_key); set NOMON_FLEET_REQUIRE_DEVICE_KEY=1 to refuse",
+                request.vin,
+            )
         try:
             item = await store.register_device(claims.sub, request.vin, request.model)
+            if pinned is None and request.device_public_key:
+                await store.set_device_public_key(request.vin, request.device_public_key)
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except RuntimeError as exc:

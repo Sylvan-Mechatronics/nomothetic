@@ -33,6 +33,8 @@
 | 26 | AI Chat-Command Relay (device mode) | ✅ Complete |
 | 27 | Autonomy Telemetry Persistence (MQTT device→central) | ✅ Complete |
 | 28 | Voice Command Transcription (on-device STT) | ✅ Complete |
+| 30 | Raw Inputs for Autonomy (odometry, IMU, UWB), `cmd_vel`, Vehicle Arbitration | 🔜 Planned — autonomon ADR-008 |
+| 31 | Security Hardening 2 (workspace review 2026-09-13) | ✅ Complete except S-24; see `REVIEW-2026-09-13.md` §7 |
 
 **Test totals (current): 663 passing** (23 camera + 14 streaming + 168 API + 36 telemetry + 94 HAT + 19 audio + 18 auth + 29 central + 32 device-auth + 17 db + 41 pairing + 12 rate-limit + 6 mode + 15 network-provision + 13 token-store + 25 user-store + 22 fleet-store + 7 wifi-ap + 72 routine-launcher [10 catalogue + 17 control + 16 logs + 29 manager]; `ap_mode` tests removed — see ADR-016 amendment)
 
@@ -1805,6 +1807,76 @@ See ADR-021.
 - [ ] On-device: phrase → chime → spoken command → robot action → success
       chime; follow-up command without re-waking; `/api/audio/record` works
       while the listener is enabled. (Verify at next deploy.)
+
+---
+
+### Phase 30 — Raw Inputs for Autonomy, `cmd_vel`, Vehicle Arbitration
+
+> Set by autonomon ADR-008 (2026-09-13). nomothetic stays a thin raw-I/O
+> gateway (autonomon ADR-004): three new **raw** sensor endpoints, one new
+> actuator endpoint, and a single rule for who may drive.
+
+**Cross-repo dependency:** nomopractic Phase 16 (`read_odometry`, `read_imu`,
+`read_uwb`, `cmd_vel` IPC).
+
+#### 30.1 — Raw sensor endpoints
+- [ ] `GET /api/sensor/odometry` → `read_odometry` passthrough (+ `timestamp`)
+- [ ] `GET /api/sensor/imu` → `read_imu` passthrough
+- [ ] `GET /api/sensor/uwb` → `read_uwb` passthrough
+- [ ] `HatClient.read_odometry/read_imu/read_uwb`; `docs/hat_ipc_schema.md`
+      updated (the four-files-together rule in `CLAUDE.md`)
+
+#### 30.2 — Body-velocity actuator
+- [ ] `POST /api/cmd_vel {v_mps, omega_radps, ttl_ms}` → `cmd_vel` IPC, same
+      100–5000 ms TTL bounds as `drive`/`steer`; no interpretation
+
+#### 30.3 — Vehicle ownership / arbitration
+- [ ] One `VehicleArbiter` in `api.py`: a command source (`manual` app pad,
+      `ai` relay, `voice`, `routine` plugin token) must hold the vehicle to
+      issue motion; priority `estop > manual > ai/voice > routine`; a
+      higher-priority source pre-empts and the displaced source's next
+      motion call returns 409 with the current owner
+- [ ] `POST /api/vehicle/estop` — owner-only, idles motors, stops all
+      routines, and holds the vehicle until cleared
+- [ ] Plugin tokens are limited to the raw I/O surface (review finding S-2)
+
+#### Phase 30 Exit Criteria
+- [ ] `tests/test_api.py` covers the three sensor endpoints, `cmd_vel`
+      bounds, arbitration pre-emption, and e-stop
+- [ ] `make check` clean
+
+---
+
+### Phase 31 — Security Hardening 2 (workspace review 2026-09-13)
+
+Findings and status live in `REVIEW-2026-09-13.md` (workspace root, §3 and §7).
+
+- [x] S-1 — Soft AP passphrase decoupled from the 8-digit pairing code
+      (`pairing.load_or_generate_ap_passphrase`, `/var/lib/nomon/ap_passphrase`,
+      `NOMON_AP_PASSPHRASE_PATH`; nomopractic `ap-mode.sh` reads it)
+- [x] S-2 — JWT `scope` claim; plugin tokens confined to the raw I/O surface
+      (`auth.device_jwt_required`, `auth.owner_required`)
+- [x] S-4 — MQTT credentials + TLS (`NOMON_MQTT_USERNAME/PASSWORD/TLS/CA_CERT`)
+      on publisher, forwarder, consumer
+- [x] S-5 — `NOMON_REGISTRATION_INVITE_CODE` gate on central registration
+- [x] S-8 — internal MJPEG server loopback-only by default
+      (`NOMON_STREAM_ALLOW_REMOTE_BIND` opt-out)
+- [x] S-12 — plugin challenge/token loopback-only (`NOMON_PLUGIN_AUTH_ALLOW_REMOTE`
+      opt-out) and rate limited
+- [x] S-3 — Ed25519 device identity (`device_identity.py`); central verifies
+      and pins `device_public_key` per VIN (nomographic V5);
+      `NOMON_FLEET_REQUIRE_DEVICE_KEY` to refuse legacy keyless proofs
+- [x] S-9 — `NOMON_SUDO_PASS` moved off the ssh argv (stdin) in every deploy
+      script; scoped `sudoers.d` still preferable long-term
+- [x] S-10 — routine params allow-listed against the published schema
+      (`routine_manager.validate_routine_params`); autonomon confines
+      `model_path` / `rules_path` params
+- [x] S-11 — voice motion gated on operator presence
+      (`NOMON_WAKE_MOTION_TOOLS`, `NOMON_WAKE_PRESENCE_WINDOW_S`)
+- [x] S-13 — starlette 1.6 / urllib3 2.7; `cargo audit` clean
+- [x] S-14 — refresh + events rate limits
+- [x] S-17 — systemd hardening on the three units (verify on next Pi deploy)
+- [ ] S-24 — server-side AI conversation history
 
 ---
 

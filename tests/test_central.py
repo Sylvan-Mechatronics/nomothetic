@@ -103,6 +103,25 @@ def test_register_success(central_client):
     assert data["user"]["display_name"] == "Alice"
 
 
+def test_register_requires_invite_code_when_configured(central_client, monkeypatch):
+    """With NOMON_REGISTRATION_INVITE_CODE set, registration needs the code (S-5)."""
+    monkeypatch.setenv("NOMON_REGISTRATION_INVITE_CODE", "friends-only")
+    body = {"email": "bob@example.com", "password": "password123", "display_name": "Bob"}
+    assert central_client.post("/api/auth/register", json=body).status_code == 403
+    assert (
+        central_client.post("/api/auth/register", json={**body, "invite_code": "wrong"}).status_code
+        == 403
+    )
+    ok = central_client.post("/api/auth/register", json={**body, "invite_code": "friends-only"})
+    assert ok.status_code == 201
+
+
+def test_register_open_when_no_invite_code(central_client, monkeypatch):
+    monkeypatch.delenv("NOMON_REGISTRATION_INVITE_CODE", raising=False)
+    body = {"email": "carol@example.com", "password": "password123", "display_name": "Carol"}
+    assert central_client.post("/api/auth/register", json=body).status_code == 201
+
+
 def test_register_duplicate_email(central_client):
     """Duplicate email registration returns 409."""
     payload = {

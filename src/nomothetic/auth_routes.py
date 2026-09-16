@@ -4,7 +4,9 @@ Provides user registration, login, token refresh, logout, and profile retrieval.
 All endpoints are tagged ``Auth`` in the OpenAPI docs.
 """
 
+import hmac
 import logging
+import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -16,7 +18,7 @@ from nomothetic.auth import (
     get_auth_service,
     jwt_required,
 )
-from nomothetic.rate_limit import login_rate_limit, register_rate_limit
+from nomothetic.rate_limit import login_rate_limit, refresh_rate_limit, register_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,18 @@ class RegisterRequest(BaseModel):
     email: EmailStr = Field(..., description="User email address")
     password: str = Field(..., min_length=8, description="Password (min 8 chars)")
     display_name: str = Field(..., min_length=1, max_length=100, description="Display name")
+    invite_code: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Required when the server sets NOMON_REGISTRATION_INVITE_CODE; " "otherwise ignored."
+        ),
+    )
+
+
+def _invite_code_required() -> str:
+    """Return the configured registration invite code, or ``""`` if open."""
+    return os.environ.get("NOMON_REGISTRATION_INVITE_CODE", "").strip()
 
 
 class LoginRequest(BaseModel):
@@ -142,8 +156,10 @@ def create_auth_router() -> APIRouter:
         """Register a new user account and return tokens.
 
         .. note::
-            Email verification is deferred to a future phase. Currently
-            any email can be used to register and receive tokens immediately.
+            Email verification is deferred to a future phase. Until then, set
+            ``NOMON_REGISTRATION_INVITE_CODE`` on the central server so only
+            people holding the code can create accounts (review finding S-5);
+            with it unset any email can register and receive tokens immediately.
 
         Returns
         -------
@@ -153,10 +169,19 @@ def create_auth_router() -> APIRouter:
         Raises
         ------
         HTTPException
+            403 if an invite code is required and missing/wrong.
             409 if the email is already registered.
             422 on validation failure.
             429 if rate limit is exceeded.
         """
+        required = _invite_code_required()
+        if required and not (
+            request.invite_code and hmac.compare_digest(request.invite_code, required)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Registration requires a valid invite code",
+            )
         svc = _require_service()
         try:
             user = await svc.create_user(request.email, request.password, request.display_name)
@@ -203,7 +228,9 @@ def create_auth_router() -> APIRouter:
         tokens = await svc.create_tokens(user.email)
         return TokenResponse(**tokens)
 
-    @router.post("/refresh", response_model=TokenResponse)
+    @router.post(
+        "/refresh", response_model=TokenResponse, dependencies=[Depends(refresh_rate_limit)]
+    )
     async def refresh(request: RefreshRequest):
         """Rotate a refresh token and issue new tokens.
 

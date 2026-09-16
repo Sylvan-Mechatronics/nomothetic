@@ -10,6 +10,12 @@ guarded by its own constraint instead:
   plugin only.
 * ``POST /api/plugin/token`` — issues a device JWT only on a valid signature over
   an unexpired nonce.
+
+``challenge`` and ``token`` are localhost-only as well unless
+``NOMON_PLUGIN_AUTH_ALLOW_REMOTE`` is set (a remotely hosted brain, autonomon
+ADR-004 D4), and both are rate limited, so a remote flood can neither evict the
+on-device plugin's in-flight nonce nor hammer signature verification (review
+finding S-12).
 """
 
 from __future__ import annotations
@@ -17,10 +23,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 from datetime import datetime, timezone
 from ipaddress import ip_address
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from nomothetic.auth import _PLUGIN_TOKEN_TTL, get_auth_service
@@ -32,6 +39,7 @@ from nomothetic.plugin_auth import (
     PluginKeyStore,
     verify_signature,
 )
+from nomothetic.rate_limit import plugin_auth_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +99,28 @@ class PluginTokenResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _remote_auth_allowed() -> bool:
+    """Whether challenge/token may be called from off-device (opt-in)."""
+    return os.environ.get("NOMON_PLUGIN_AUTH_ALLOW_REMOTE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _require_local_unless_allowed(request: Request) -> None:
+    """403 unless the caller is loopback or remote plugin auth is enabled."""
+    if _is_localhost(request) or _remote_auth_allowed():
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            "Plugin authentication is only available from localhost "
+            "(set NOMON_PLUGIN_AUTH_ALLOW_REMOTE=1 for a remotely hosted brain)"
+        ),
+    )
 
 
 def _is_localhost(request: Request) -> bool:
@@ -175,16 +205,23 @@ def create_plugin_auth_router() -> APIRouter:
         logger.info("Plugin %r registration: %s", body.plugin, outcome)
         return PluginRegisterResponse(plugin=body.plugin, status=outcome, timestamp=_now())
 
-    @router.get("/challenge", response_model=PluginChallengeResponse)
+    @router.get(
+        "/challenge",
+        response_model=PluginChallengeResponse,
+        dependencies=[Depends(plugin_auth_rate_limit)],
+    )
     async def challenge(plugin: str, request: Request):
         """Issue a single-use challenge nonce for a registered plugin.
 
         Raises
         ------
         HTTPException
+            403 if the caller is off-device and remote plugin auth is disabled.
             404 if the plugin is not registered.
             400 if the plugin name is invalid.
+            429 if the rate limit is exceeded.
         """
+        _require_local_unless_allowed(request)
         store = _key_store(request)
         try:
             known = await asyncio.to_thread(store.get_public_key, plugin)
@@ -198,18 +235,26 @@ def create_plugin_auth_router() -> APIRouter:
         nonce, ttl = _challenge_store(request).issue(plugin)
         return PluginChallengeResponse(plugin=plugin, nonce=nonce, expires_in=ttl, timestamp=_now())
 
-    @router.post("/token", response_model=PluginTokenResponse, status_code=200)
+    @router.post(
+        "/token",
+        response_model=PluginTokenResponse,
+        status_code=200,
+        dependencies=[Depends(plugin_auth_rate_limit)],
+    )
     async def token(body: PluginTokenRequest, request: Request):
         """Exchange a signed nonce for a device JWT.
 
         Raises
         ------
         HTTPException
+            403 if the caller is off-device and remote plugin auth is disabled.
             401 if the plugin is unknown, the nonce is invalid/expired, or the
             signature does not verify.
             400 if the signature is not valid base64.
+            429 if the rate limit is exceeded.
             503 if the auth service is unavailable.
         """
+        _require_local_unless_allowed(request)
         store = _key_store(request)
         try:
             public_key = await asyncio.to_thread(store.get_public_key, body.plugin)

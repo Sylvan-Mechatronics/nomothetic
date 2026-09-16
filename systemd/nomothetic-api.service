@@ -32,6 +32,18 @@ Environment=NOMON_API_MODE=device
 Environment=NOMON_DEVICE_AUTH=true
 Environment=NOMON_AP_MODE_SCRIPT=/usr/local/bin/ap-mode.sh
 
+# Sandboxing (review finding S-17). NoNewPrivileges is deliberately absent: the
+# service calls sudo for the scoped ap-mode.sh systemctl rule. /var/lib/nomon,
+# /run/nomothetic and the media dir stay writable; /usr, /boot, /etc are not.
+ProtectSystem=full
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictSUIDSGID=true
+
 Restart=on-failure
 RestartSec=5s
 

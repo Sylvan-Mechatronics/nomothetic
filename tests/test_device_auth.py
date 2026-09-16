@@ -546,18 +546,44 @@ def test_identity_proof_vin_bound_to_env_override(device_auth_client):
     assert payload["sub"] == "CUSTOM-VIN-9999"
 
 
-def test_identity_rate_limited(device_auth_client):
-    """GET /identity shares the pairing rate limit (3 per minute)."""
+def test_identity_not_starved_by_pairing_limit(device_auth_client):
+    """GET /identity has its own limiter, so pairing attempts do not starve it."""
     client, app = device_auth_client
     token = _get_token(client, app)
-    # Exhaust the pairing rate limit (3/min) with wrong-secret pair attempts
+    # Exhaust the pairing rate limit (3/min) with wrong-secret pair attempts.
     for _ in range(3):
         client.post(
             "/api/device/auth/pair",
             json={"secret": "wrong", "display_name": "Attacker"},
         )
+    # Identity is a separate budget and must still be reachable.
     resp = client.get(
         "/api/device/auth/identity",
         headers={"Authorization": f"Bearer {token}"},
     )
+    assert resp.status_code == 200
+
+
+def test_identity_rate_limited(device_auth_client):
+    """GET /identity is rate limited on its own budget (10 per minute)."""
+    client, app = device_auth_client
+    token = _get_token(client, app)
+    headers = {"Authorization": f"Bearer {token}"}
+    for _ in range(10):
+        assert client.get("/api/device/auth/identity", headers=headers).status_code == 200
+    resp = client.get("/api/device/auth/identity", headers=headers)
     assert resp.status_code == 429
+
+
+def test_identity_limit_does_not_starve_pairing(device_auth_client):
+    """Exhausting the identity budget leaves the pairing budget intact."""
+    client, app = device_auth_client
+    token = _get_token(client, app)
+    headers = {"Authorization": f"Bearer {token}"}
+    for _ in range(11):
+        client.get("/api/device/auth/identity", headers=headers)
+    resp = client.post(
+        "/api/device/auth/pair",
+        json={"secret": "wrong", "display_name": "Attacker"},
+    )
+    assert resp.status_code != 429

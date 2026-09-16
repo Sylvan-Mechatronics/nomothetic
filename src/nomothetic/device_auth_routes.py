@@ -15,13 +15,14 @@ import socket
 from datetime import datetime, timezone
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from nomothetic.auth import AuthService, TokenPayload, get_auth_service, jwt_required
+from nomothetic.auth import AuthService, TokenPayload, get_auth_service, owner_required
 from nomothetic.pairing import PairingState
-from nomothetic.rate_limit import pairing_rate_limit
+from nomothetic.rate_limit import identity_rate_limit, pairing_rate_limit, refresh_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,8 @@ class ApPairRequest(BaseModel):
     """AP-mode pairing request body (no explicit secret required).
 
     Network presence on the 192.168.4.0/24 subnet proves the client
-    authenticated with the WPA2 passphrase, which equals the pairing secret.
+    authenticated with the Soft AP's WPA2 passphrase — since review finding
+    S-1 a separate 20-character secret, not the 8-digit pairing code.
     """
 
     display_name: str = Field(..., min_length=1, max_length=100, description="Owner display name")
@@ -106,13 +108,13 @@ class DeviceIdentityResponse(BaseModel):
     hostname: str
     firmware_version: str
     registration_proof: str
-    """Short-lived proof token (JWT) signed by the device secret.
-
-    Submit this to the central fleet registration endpoint alongside the VIN
-    to prove recent device JWT access. The central API validates expiry and
-    VIN binding; signature verification requires asymmetric device
-    certificates (planned future work).
-    """
+    """Short-lived proof token (JWT, ``alg=EdDSA``) signed by this device's
+    identity key. Submit it to the central fleet registration endpoint with
+    the VIN and ``device_public_key``; central verifies the signature and pins
+    the key to the VIN on first registration (review finding S-3)."""
+    device_public_key: Optional[str] = None
+    """PEM public key matching the proof signature (``None`` only on legacy
+    builds without a device identity)."""
 
 
 # ---------------------------------------------------------------------------
@@ -320,8 +322,10 @@ def create_device_auth_router() -> APIRouter:
         """Pair via Soft AP network presence — no explicit secret required.
 
         Only accepts requests from 192.168.4.0/24. Being on that subnet proves
-        the client authenticated with the WPA2 passphrase, which is the same
-        value as the pairing secret (see nomopractic ADR-005). This network
+        the client authenticated with the Soft AP's WPA2 passphrase — the
+        20-character secret in ``ap_passphrase``, which since review finding
+        S-1 is deliberately distinct from the 8-digit pairing code (an 8-digit
+        PSK is crackable offline from a captured handshake). This network
         presence also authorises secure re-pairing when a previous session
         already exists.
 
@@ -356,7 +360,9 @@ def create_device_auth_router() -> APIRouter:
         logger.info("Device paired via AP network for %s", request_body.display_name)
         return response
 
-    @router.post("/refresh", response_model=TokenResponse)
+    @router.post(
+        "/refresh", response_model=TokenResponse, dependencies=[Depends(refresh_rate_limit)]
+    )
     async def refresh(request_body: RefreshRequest):
         """Rotate a refresh token and issue new tokens.
 
@@ -383,12 +389,13 @@ def create_device_auth_router() -> APIRouter:
     @router.delete("/session", response_model=SessionResetResponse)
     async def delete_session(
         request: Request,
-        claims: TokenPayload = Depends(jwt_required),
+        claims: TokenPayload = Depends(owner_required),
     ):
         """Invalidate the current device session and reopen pairing.
 
-        Requires a valid device JWT. The current signing secret is rotated so
-        both access and refresh tokens from the old session stop working.
+        Requires a valid **owner** device JWT (a plugin token is refused with
+        403). The current signing secret is rotated so both access and refresh
+        tokens from the old session stop working.
         """
         pairing = _get_pairing(request)
         svc = _require_service()
@@ -399,7 +406,7 @@ def create_device_auth_router() -> APIRouter:
         )
 
     @router.get("/me", response_model=DeviceUserResponse)
-    async def me(claims: TokenPayload = Depends(jwt_required)):
+    async def me(claims: TokenPayload = Depends(owner_required)):
         """Return the paired owner's profile.
 
         Returns
@@ -431,16 +438,17 @@ def create_device_auth_router() -> APIRouter:
     @router.get(
         "/identity",
         response_model=DeviceIdentityResponse,
-        dependencies=[Depends(pairing_rate_limit)],
+        dependencies=[Depends(identity_rate_limit)],
     )
-    async def identity(_claims: TokenPayload = Depends(jwt_required)):
+    async def identity(request: Request, _claims: TokenPayload = Depends(owner_required)):
         """Return the device's hardware identity.
 
         Returns
         -------
         DeviceIdentityResponse
-            VIN (Pi serial / env override), model name, hostname, and a
-            short-lived registration proof token.
+            VIN (Pi serial / env override), model name, hostname, a
+            short-lived registration proof signed by the device identity key,
+            and that key's public half.
 
         Raises
         ------
@@ -454,12 +462,20 @@ def create_device_auth_router() -> APIRouter:
             firmware_version = _meta.version("nomothetic")
         except _meta.PackageNotFoundError:
             firmware_version = "unknown"
+        identity_key = getattr(request.app.state, "device_identity", None)
+        if identity_key is not None:
+            proof = identity_key.create_registration_proof(vin)
+            public_key: Optional[str] = identity_key.public_key_pem
+        else:  # legacy: unverifiable HS256 proof
+            proof = svc.create_registration_proof(vin)
+            public_key = None
         return DeviceIdentityResponse(
             vin=vin,
             model=os.environ.get("NOMON_MODEL", "nomon"),
             hostname=socket.gethostname(),
             firmware_version=firmware_version,
-            registration_proof=svc.create_registration_proof(vin),
+            registration_proof=proof,
+            device_public_key=public_key,
         )
 
     return router

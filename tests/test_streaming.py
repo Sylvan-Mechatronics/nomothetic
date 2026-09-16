@@ -1,6 +1,7 @@
 """Tests for streaming server module."""
 
 import sys
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -247,6 +248,27 @@ class TestStreamServerLifecycle:
         server.close()
 
         mock_cam.close.assert_called_once()
+
+    @patch("nomothetic.streaming.Camera")
+    @patch("nomothetic.streaming.Flask")
+    def test_close_from_server_thread_does_not_self_join(self, mock_flask, mock_camera):
+        """close() called on the server thread (start()'s finally) must not join itself."""
+        mock_flask.return_value = MagicMock()
+        mock_camera.return_value = MagicMock()
+        server = StreamServer()
+        errors: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                server.close()
+            except BaseException as e:  # noqa: BLE001 — surface to the test thread
+                errors.append(e)
+
+        server._thread = threading.Thread(target=run)
+        server._thread.start()
+        server._thread.join(timeout=5.0)
+
+        assert errors == []
 
     @patch("nomothetic.streaming.Camera")
     @patch("nomothetic.streaming.Flask")
