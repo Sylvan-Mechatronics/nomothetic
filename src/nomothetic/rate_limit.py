@@ -153,6 +153,16 @@ async def events_rate_limit(request: Request) -> None:
     _check_optional(request, "events_limiter")
 
 
+async def identity_rate_limit(request: Request) -> None:
+    """Rate-limit the device identity endpoint: 10/min per IP.
+
+    Kept separate from ``pairing_limiter``: ``/identity`` is an owner-only
+    registration path, and sharing the 3/min pairing budget meant a couple of
+    pairing attempts could starve a fleet registration (and vice versa).
+    """
+    _check_optional(request, "identity_limiter")
+
+
 async def plugin_auth_rate_limit(request: Request) -> None:
     """FastAPI dependency that rate-limits the plugin challenge/token endpoints.
 

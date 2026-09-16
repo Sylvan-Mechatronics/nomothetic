@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from nomothetic.auth import AuthService, TokenPayload, get_auth_service, owner_required
 from nomothetic.pairing import PairingState
-from nomothetic.rate_limit import pairing_rate_limit, refresh_rate_limit
+from nomothetic.rate_limit import identity_rate_limit, pairing_rate_limit, refresh_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,8 @@ class ApPairRequest(BaseModel):
     """AP-mode pairing request body (no explicit secret required).
 
     Network presence on the 192.168.4.0/24 subnet proves the client
-    authenticated with the WPA2 passphrase, which equals the pairing secret.
+    authenticated with the Soft AP's WPA2 passphrase — since review finding
+    S-1 a separate 20-character secret, not the 8-digit pairing code.
     """
 
     display_name: str = Field(..., min_length=1, max_length=100, description="Owner display name")
@@ -321,8 +322,10 @@ def create_device_auth_router() -> APIRouter:
         """Pair via Soft AP network presence — no explicit secret required.
 
         Only accepts requests from 192.168.4.0/24. Being on that subnet proves
-        the client authenticated with the WPA2 passphrase, which is the same
-        value as the pairing secret (see nomopractic ADR-005). This network
+        the client authenticated with the Soft AP's WPA2 passphrase — the
+        20-character secret in ``ap_passphrase``, which since review finding
+        S-1 is deliberately distinct from the 8-digit pairing code (an 8-digit
+        PSK is crackable offline from a captured handshake). This network
         presence also authorises secure re-pairing when a previous session
         already exists.
 
@@ -435,7 +438,7 @@ def create_device_auth_router() -> APIRouter:
     @router.get(
         "/identity",
         response_model=DeviceIdentityResponse,
-        dependencies=[Depends(pairing_rate_limit)],
+        dependencies=[Depends(identity_rate_limit)],
     )
     async def identity(request: Request, _claims: TokenPayload = Depends(owner_required)):
         """Return the device's hardware identity.

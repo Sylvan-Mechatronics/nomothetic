@@ -1392,6 +1392,8 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         # Review S-14: refresh and the routine event sink were unlimited.
         app.state.refresh_limiter = RateLimiter(max_requests=20, window_seconds=60)
         app.state.events_limiter = RateLimiter(max_requests=120, window_seconds=60)
+        # Owner-only registration proof; kept off the 3/min pairing budget.
+        app.state.identity_limiter = RateLimiter(max_requests=10, window_seconds=60)
 
         # PairingState is always constructed fresh here, so is_paired() is
         # always False at this point. The guard is retained for clarity and
