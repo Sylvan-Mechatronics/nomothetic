@@ -1660,7 +1660,7 @@ wheels = [
 
 [[package]]
 name = "nomothetic"
-version = "0.10.0"
+version = "0.10.1"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi", version = "0.128.8", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
