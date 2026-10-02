@@ -100,6 +100,14 @@ packages = ["nomothetic"]
 [tool.setuptools.package-dir]
 "" = "src"
 
+# python-prctl (pulled in by picamera2 via the `pi` extra) is sdist-only and
+# needs libcap headers to build, which Dependabot's runner lacks. Declaring its
+# metadata lets `uv lock` resolve without building it (it has no dependencies).
+[[tool.uv.dependency-metadata]]
+name = "python-prctl"
+version = "1.8.1"
+requires-dist = []
+
 [tool.black]
 line-length = 100
 target-version = ["py39", "py310", "py311", "py312"]
