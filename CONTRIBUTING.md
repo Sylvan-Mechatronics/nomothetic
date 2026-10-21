@@ -4,7 +4,7 @@
 
 ### Requirements
 
-- Python 3.9+
+- Python 3.10+
 - Windows, macOS, or Linux (tests must pass on all three)
 - Hardware is mocked in tests — no Raspberry Pi required for development
 
