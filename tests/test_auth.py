@@ -170,9 +170,7 @@ def test_create_tokens_returns_both(auth_service):
     """create_tokens returns access, refresh, type, and expiry."""
     import asyncio
 
-    tokens = asyncio.get_event_loop().run_until_complete(
-        auth_service.create_tokens("alice@example.com")
-    )
+    tokens = asyncio.run(auth_service.create_tokens("alice@example.com"))
     assert "access_token" in tokens
     assert "refresh_token" in tokens
     assert tokens["token_type"] == "bearer"
