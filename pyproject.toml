@@ -30,7 +30,7 @@ dependencies = [
     "pigpio>=1.78",
     "smbus2>=0.4.1",
     "pyserial>=3.5",
-    "fastapi>=0.128.8",
+    "fastapi>=0.100",
     "pydantic[email]>=2.12.5",
     "httpx>=0.28.1",
 ]
