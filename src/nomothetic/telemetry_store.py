@@ -8,7 +8,7 @@ the read/write counterpart that the central API and MQTT consumer use.
 """
 
 import logging
-from typing import TYPE_CHECKING, Optional, runtime_checkable
+from typing import TYPE_CHECKING, runtime_checkable
 
 from pydantic import BaseModel
 from typing_extensions import Protocol
@@ -61,7 +61,7 @@ class TelemetryStore(Protocol):
         ...  # pragma: no cover
 
     async def get_history(
-        self, vin: str, limit: int = 100, since: Optional[str] = None
+        self, vin: str, limit: int = 100, since: str | None = None
     ) -> list[TelemetryReadingItem]:
         """Return readings for a device, most recent first.
 
@@ -81,7 +81,7 @@ class TelemetryStore(Protocol):
         """
         ...  # pragma: no cover
 
-    async def get_latest(self, vin: str) -> Optional[TelemetryReadingItem]:
+    async def get_latest(self, vin: str) -> TelemetryReadingItem | None:
         """Return the most recent reading for a device, or ``None``.
 
         Parameters
@@ -124,7 +124,7 @@ class InMemoryTelemetryStore:
             del bucket[0 : len(bucket) - self._max_per_vin]
 
     async def get_history(
-        self, vin: str, limit: int = 100, since: Optional[str] = None
+        self, vin: str, limit: int = 100, since: str | None = None
     ) -> list[TelemetryReadingItem]:
         """Return up to ``limit`` readings for the device, newest first."""
         bucket = self._readings.get(vin, [])
@@ -135,7 +135,7 @@ class InMemoryTelemetryStore:
         ordered = sorted(rows, key=lambda r: r.recorded_at, reverse=True)
         return ordered[: max(limit, 0)]
 
-    async def get_latest(self, vin: str) -> Optional[TelemetryReadingItem]:
+    async def get_latest(self, vin: str) -> TelemetryReadingItem | None:
         """Return the most recent reading for the device, or ``None``."""
         history = await self.get_history(vin, limit=1)
         return history[0] if history else None
@@ -187,7 +187,7 @@ class SqlTelemetryStore:
         )
 
     async def get_history(
-        self, vin: str, limit: int = 100, since: Optional[str] = None
+        self, vin: str, limit: int = 100, since: str | None = None
     ) -> list[TelemetryReadingItem]:
         """Traverse Vehicle.in('ReadFrom') and return readings newest first."""
         params: dict[str, object] = {"vin": vin, "limit": max(limit, 0)}
@@ -203,7 +203,7 @@ class SqlTelemetryStore:
         rows = await self._db.execute_sql(query, params)
         return [_row_to_item(row) for row in rows]
 
-    async def get_latest(self, vin: str) -> Optional[TelemetryReadingItem]:
+    async def get_latest(self, vin: str) -> TelemetryReadingItem | None:
         """Return the most recent reading for the device, or ``None``."""
         history = await self.get_history(vin, limit=1)
         return history[0] if history else None

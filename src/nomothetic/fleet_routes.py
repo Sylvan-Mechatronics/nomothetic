@@ -10,8 +10,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from pydantic import BaseModel, Field
@@ -43,7 +42,7 @@ class DeviceRegisterRequest(BaseModel):
             "Binds this registration request to recent device access."
         ),
     )
-    device_public_key: Optional[str] = Field(
+    device_public_key: str | None = Field(
         default=None,
         max_length=4096,
         description=(
@@ -74,11 +73,11 @@ class DeviceDetailResponse(BaseModel):
 
     vin: str
     model: str
-    firmware_version: Optional[str] = None
-    last_seen_at: Optional[str] = None
+    firmware_version: str | None = None
+    last_seen_at: str | None = None
     registered_at: str
     role: str
-    latest_telemetry: Optional[dict] = None
+    latest_telemetry: dict | None = None
     timestamp: str
 
 
@@ -194,9 +193,9 @@ def _require_device_key() -> bool:
 
 
 # Module-level stores (set by create_app).
-_fleet_store: Optional[FleetStore] = None
-_telemetry_store: Optional[TelemetryStore] = None
-_autonomy_store: Optional[AutonomyStore] = None
+_fleet_store: FleetStore | None = None
+_telemetry_store: TelemetryStore | None = None
+_autonomy_store: AutonomyStore | None = None
 
 
 def set_fleet_store(store: FleetStore) -> None:
@@ -205,7 +204,7 @@ def set_fleet_store(store: FleetStore) -> None:
     _fleet_store = store
 
 
-def get_fleet_store() -> Optional[FleetStore]:
+def get_fleet_store() -> FleetStore | None:
     """Return the current fleet store (if configured)."""
     return _fleet_store
 
@@ -216,7 +215,7 @@ def set_telemetry_store(store: TelemetryStore) -> None:
     _telemetry_store = store
 
 
-def get_telemetry_store() -> Optional[TelemetryStore]:
+def get_telemetry_store() -> TelemetryStore | None:
     """Return the current telemetry store (if configured)."""
     return _telemetry_store
 
@@ -227,7 +226,7 @@ def set_autonomy_store(store: AutonomyStore) -> None:
     _autonomy_store = store
 
 
-def get_autonomy_store() -> Optional[AutonomyStore]:
+def get_autonomy_store() -> AutonomyStore | None:
     """Return the current autonomy store (if configured)."""
     return _autonomy_store
 
@@ -330,7 +329,7 @@ def create_fleet_router() -> APIRouter:
             vin=item.vin,
             model=item.model,
             registered_at=item.registered_at,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @router.get("/devices", response_model=DeviceListResponse)
@@ -346,7 +345,7 @@ def create_fleet_router() -> APIRouter:
         devices = await store.get_devices(claims.sub)
         return DeviceListResponse(
             devices=devices,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @router.get("/devices/{vin}", response_model=DeviceDetailResponse)
@@ -373,7 +372,7 @@ def create_fleet_router() -> APIRouter:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Device {vin} not found",
             )
-        latest_telemetry: Optional[dict] = None
+        latest_telemetry: dict | None = None
         telemetry_store = get_telemetry_store()
         if telemetry_store is not None:
             latest = await telemetry_store.get_latest(vin)
@@ -387,14 +386,14 @@ def create_fleet_router() -> APIRouter:
             registered_at=item.registered_at,
             role=item.role,
             latest_telemetry=latest_telemetry,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @router.get("/devices/{vin}/telemetry", response_model=DeviceTelemetryResponse)
     async def get_device_telemetry(
         vin: str = Path(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$"),
         limit: int = Query(100, ge=1, le=1000),
-        since: Optional[str] = Query(None, description="ISO-8601 lower bound on recorded_at"),
+        since: str | None = Query(None, description="ISO-8601 lower bound on recorded_at"),
         claims: TokenPayload = Depends(jwt_required),
     ):
         """Return telemetry history for a device the caller owns, newest first.
@@ -427,14 +426,14 @@ def create_fleet_router() -> APIRouter:
         return DeviceTelemetryResponse(
             vin=vin,
             readings=readings,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @router.get("/devices/{vin}/autonomy", response_model=DeviceAutonomyRunsResponse)
     async def get_device_autonomy(
         vin: str = Path(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$"),
         limit: int = Query(50, ge=1, le=500),
-        since: Optional[str] = Query(None, description="ISO-8601 lower bound on started_at"),
+        since: str | None = Query(None, description="ISO-8601 lower bound on started_at"),
         claims: TokenPayload = Depends(jwt_required),
     ):
         """Return autonomy run history for a device the caller owns.
@@ -470,7 +469,7 @@ def create_fleet_router() -> APIRouter:
         return DeviceAutonomyRunsResponse(
             vin=vin,
             runs=runs,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @router.get(
@@ -516,7 +515,7 @@ def create_fleet_router() -> APIRouter:
             vin=vin,
             run_id=run_id,
             events=events,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @router.delete("/devices/{vin}", response_model=DeviceRemoveResponse)
@@ -549,7 +548,7 @@ def create_fleet_router() -> APIRouter:
         return DeviceRemoveResponse(
             vin=vin,
             removed=True,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     return router

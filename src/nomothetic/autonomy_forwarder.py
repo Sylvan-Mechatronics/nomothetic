@@ -77,13 +77,13 @@ class AutonomyEventForwarder:
         broker: str,
         port: int = 1883,
         topic: str = DEFAULT_AUTONOMY_TOPIC,
-        device_id: Optional[str] = None,
+        device_id: str | None = None,
         qos: int = 1,
         max_queue: int = _MAX_QUEUE_DEFAULT,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
+        username: str | None = None,
+        password: str | None = None,
         tls: bool = False,
-        ca_cert: Optional[str] = None,
+        ca_cert: str | None = None,
     ) -> None:
         if mqtt is None:
             raise ImportError(
@@ -105,7 +105,7 @@ class AutonomyEventForwarder:
         self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=max_queue)
         self._stop_event = threading.Event()
         self._connected = False
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._client: Any = self._create_client()
 
     # -------------------------------------------------------------------------
@@ -113,7 +113,7 @@ class AutonomyEventForwarder:
     # -------------------------------------------------------------------------
 
     @classmethod
-    def from_env(cls, device_id: Optional[str] = None) -> Optional["AutonomyEventForwarder"]:
+    def from_env(cls, device_id: str | None = None) -> Optional["AutonomyEventForwarder"]:
         """Build a forwarder from environment, or ``None`` when no broker is set.
 
         Reads ``NOMON_MQTT_BROKER`` (required), ``NOMON_MQTT_PORT`` (default

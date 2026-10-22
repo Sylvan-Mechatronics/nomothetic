@@ -7,6 +7,7 @@ register/challenge/token route flow. No Pi hardware required.
 import base64
 import os
 import time
+from datetime import UTC
 from unittest.mock import patch
 
 import pytest
@@ -405,7 +406,7 @@ def test_plugin_token_carries_plugin_scope():
 
 def test_scope_inferred_for_legacy_tokens_without_claim():
     """A pre-scope plugin token must not be upgraded to owner on deploy."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from authlib.jose import JsonWebToken
 
@@ -413,7 +414,7 @@ def test_scope_inferred_for_legacy_tokens_without_claim():
 
     secret = "y" * 32
     svc = AuthService(secret=secret)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     jwt = JsonWebToken(["HS256"])
 
     def mint(sub: str) -> str:
@@ -431,7 +432,7 @@ def test_scope_inferred_for_legacy_tokens_without_claim():
 
 
 def test_unknown_scope_rejected():
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from authlib.jose import JsonWebToken
 
@@ -439,7 +440,7 @@ def test_unknown_scope_rejected():
 
     secret = "z" * 32
     svc = AuthService(secret=secret)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "sub": "owner@local",
         "iat": int(now.timestamp()),

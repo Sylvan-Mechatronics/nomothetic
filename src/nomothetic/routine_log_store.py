@@ -20,9 +20,10 @@ import logging
 import re
 import threading
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ class InvalidRoutineName(ValueError):
 
 def _now_iso() -> str:
     """Return the current UTC time as an ISO 8601 string."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def validate_routine_name(name: str) -> str:
@@ -86,8 +87,8 @@ class RoutineEvent:
     timestamp: str
     type: str
     data: dict[str, Any]
-    run_id: Optional[str] = None
-    device_id: Optional[str] = None
+    run_id: str | None = None
+    device_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serialisable dict of this event."""
@@ -107,9 +108,9 @@ class RoutineRecord:
     routine: str
     events: deque[RoutineEvent]
     status: str = "unknown"
-    run_id: Optional[str] = None
-    started_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    run_id: str | None = None
+    started_at: str | None = None
+    updated_at: str | None = None
 
 
 class RoutineLogStore:
@@ -132,7 +133,7 @@ class RoutineLogStore:
     def __init__(
         self,
         max_events: int = _MAX_EVENTS_DEFAULT,
-        on_event: Optional[Callable[[str, RoutineEvent], Any]] = None,
+        on_event: Callable[[str, RoutineEvent], Any] | None = None,
     ) -> None:
         self._max_events = max_events
         self._records: dict[str, RoutineRecord] = {}
@@ -143,10 +144,10 @@ class RoutineLogStore:
         self,
         routine: str,
         event_type: str,
-        data: Optional[dict[str, Any]] = None,
-        run_id: Optional[str] = None,
-        device_id: Optional[str] = None,
-        timestamp: Optional[str] = None,
+        data: dict[str, Any] | None = None,
+        run_id: str | None = None,
+        device_id: str | None = None,
+        timestamp: str | None = None,
     ) -> RoutineEvent:
         """Append a lifecycle event for *routine* and update its status.
 
@@ -222,7 +223,7 @@ class RoutineLogStore:
 
         return event
 
-    def get(self, routine: str, limit: Optional[int] = None) -> Optional[dict[str, Any]]:
+    def get(self, routine: str, limit: int | None = None) -> dict[str, Any] | None:
         """Return a status + log snapshot for *routine*, or ``None`` if unknown.
 
         Parameters
@@ -264,7 +265,7 @@ class RoutineLogStore:
         }
 
     @classmethod
-    def _snapshot(cls, record: RoutineRecord, limit: Optional[int]) -> dict[str, Any]:
+    def _snapshot(cls, record: RoutineRecord, limit: int | None) -> dict[str, Any]:
         events = list(record.events)
         if limit is not None:
             # Guard the limit==0 case: events[-0:] would return everything.

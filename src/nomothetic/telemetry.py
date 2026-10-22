@@ -15,8 +15,8 @@ import logging
 import os
 import socket
 import threading
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 try:
     import paho.mqtt.client as mqtt
@@ -70,10 +70,10 @@ def mqtt_port_from_env(tls: bool) -> int:
 def apply_mqtt_security(
     client: Any,
     *,
-    username: Optional[str],
-    password: Optional[str],
+    username: str | None,
+    password: str | None,
     tls: bool,
-    ca_cert: Optional[str],
+    ca_cert: str | None,
     role: str,
 ) -> None:
     """Configure credentials and TLS on a paho client; warn when neither is set.
@@ -161,15 +161,15 @@ class TelemetryPublisher:
         broker: str,
         port: int = 1883,
         topic: str = "nomon/telemetry",
-        device_id: Optional[str] = None,
-        camera: Optional[Any] = None,
-        hat_client: Optional[Any] = None,
+        device_id: str | None = None,
+        camera: Any | None = None,
+        hat_client: Any | None = None,
         interval: float = 30.0,
         qos: int = 1,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
+        username: str | None = None,
+        password: str | None = None,
         tls: bool = False,
-        ca_cert: Optional[str] = None,
+        ca_cert: str | None = None,
     ) -> None:
         if mqtt is None:
             raise ImportError(
@@ -200,7 +200,7 @@ class TelemetryPublisher:
 
     @classmethod
     def from_env(
-        cls, camera: Optional[Any] = None, hat_client: Optional[Any] = None
+        cls, camera: Any | None = None, hat_client: Any | None = None
     ) -> "TelemetryPublisher":
         """Create a ``TelemetryPublisher`` from environment variables.
 
@@ -349,7 +349,7 @@ class TelemetryPublisher:
         """
         from nomothetic import __version__
 
-        camera_data: Optional[dict[str, Any]] = None
+        camera_data: dict[str, Any] | None = None
         if self.camera is not None:
             try:
                 camera_data = {
@@ -365,7 +365,7 @@ class TelemetryPublisher:
 
         return {
             "device_id": self.device_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "nomon_version": __version__,
             "battery_voltage": self._read_battery_voltage(),
             "cpu_temp_c": self._read_cpu_temp_c(),

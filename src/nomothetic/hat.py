@@ -257,7 +257,7 @@ class HatClient:
                 raise HatConnectionError("Socket is not connected")
             self._sock.sendall(line.encode())
             resp_line = self._rfile.readline()
-        except socket.timeout as e:
+        except TimeoutError as e:
             raise HatTimeoutError(f"Request timed out after {self._timeout_s}s") from e
         except OSError as e:
             # Catches BrokenPipeError, ConnectionResetError, ENOTCONN, EBADF, etc.

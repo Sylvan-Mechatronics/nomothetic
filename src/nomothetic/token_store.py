@@ -5,8 +5,8 @@ AuthService delegates token CRUD to a TokenStore implementation.
 """
 
 import logging
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Optional, runtime_checkable
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, runtime_checkable
 
 from typing_extensions import Protocol
 
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _coerce_datetime(value: Any) -> Optional[datetime]:
+def _coerce_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         dt = value
     elif isinstance(value, str):
@@ -33,8 +33,8 @@ def _coerce_datetime(value: Any) -> Optional[datetime]:
         return None
 
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 @runtime_checkable
@@ -45,7 +45,7 @@ class TokenStore(Protocol):
         """Persist a new refresh token."""
         ...  # pragma: no cover
 
-    async def get_email(self, token_hash: str) -> Optional[str]:
+    async def get_email(self, token_hash: str) -> str | None:
         """Look up the owning email for a token hash.
         Returns None if the token is not found or expired."""
         ...  # pragma: no cover
@@ -73,12 +73,12 @@ class InMemoryTokenStore:
     async def store_token(self, token_hash: str, email: str, expires_at: datetime) -> None:
         self._tokens[token_hash] = (email, expires_at)
 
-    async def get_email(self, token_hash: str) -> Optional[str]:
+    async def get_email(self, token_hash: str) -> str | None:
         entry = self._tokens.get(token_hash)
         if entry is None:
             return None
         email, expires_at = entry
-        if expires_at <= datetime.now(timezone.utc):
+        if expires_at <= datetime.now(UTC):
             # Expired — clean up lazily
             del self._tokens[token_hash]
             return None
@@ -94,7 +94,7 @@ class InMemoryTokenStore:
         return len(to_delete)
 
     async def cleanup_expired(self) -> int:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expired = [h for h, (_, exp) in self._tokens.items() if exp <= now]
         for h in expired:
             del self._tokens[h]
@@ -122,7 +122,7 @@ class SqlTokenStore:
             },
         )
 
-    async def get_email(self, token_hash: str) -> Optional[str]:
+    async def get_email(self, token_hash: str) -> str | None:
         """Look up the owning email for a token hash.
 
         Returns None if the token is not found or expired.
@@ -133,7 +133,7 @@ class SqlTokenStore:
             return None
         row = rows[0]
         expires_at = _coerce_datetime(row.get("expires_at"))
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if expires_at is not None and expires_at <= now:
             await self.delete_token(token_hash)
             return None

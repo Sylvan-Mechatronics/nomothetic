@@ -1,6 +1,6 @@
 """Tests for token store implementations."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -22,7 +22,7 @@ class TestInMemoryTokenStore:
     @pytest.mark.asyncio
     async def test_store_and_retrieve(self, store):
         """store_token + get_email returns correct email."""
-        expires = datetime.now(timezone.utc) + timedelta(hours=1)
+        expires = datetime.now(UTC) + timedelta(hours=1)
         await store.store_token("hash1", "alice@example.com", expires)
         assert await store.get_email("hash1") == "alice@example.com"
 
@@ -34,14 +34,14 @@ class TestInMemoryTokenStore:
     @pytest.mark.asyncio
     async def test_get_email_expired(self, store):
         """get_email returns None for expired token."""
-        expired = datetime.now(timezone.utc) - timedelta(hours=1)
+        expired = datetime.now(UTC) - timedelta(hours=1)
         await store.store_token("expired_hash", "bob@example.com", expired)
         assert await store.get_email("expired_hash") is None
 
     @pytest.mark.asyncio
     async def test_delete_token(self, store):
         """delete_token returns True and removes the token."""
-        expires = datetime.now(timezone.utc) + timedelta(hours=1)
+        expires = datetime.now(UTC) + timedelta(hours=1)
         await store.store_token("del_hash", "alice@example.com", expires)
         assert await store.delete_token("del_hash") is True
         assert await store.get_email("del_hash") is None
@@ -54,7 +54,7 @@ class TestInMemoryTokenStore:
     @pytest.mark.asyncio
     async def test_delete_tokens_for_user(self, store):
         """delete_tokens_for_user deletes all tokens for email, returns count."""
-        expires = datetime.now(timezone.utc) + timedelta(hours=1)
+        expires = datetime.now(UTC) + timedelta(hours=1)
         await store.store_token("h1", "alice@example.com", expires)
         await store.store_token("h2", "alice@example.com", expires)
         await store.store_token("h3", "bob@example.com", expires)
@@ -67,8 +67,8 @@ class TestInMemoryTokenStore:
     @pytest.mark.asyncio
     async def test_cleanup_expired(self, store):
         """cleanup_expired removes only expired tokens, returns count."""
-        future = datetime.now(timezone.utc) + timedelta(hours=1)
-        past = datetime.now(timezone.utc) - timedelta(hours=1)
+        future = datetime.now(UTC) + timedelta(hours=1)
+        past = datetime.now(UTC) - timedelta(hours=1)
         await store.store_token("valid", "alice@example.com", future)
         await store.store_token("stale1", "bob@example.com", past)
         await store.store_token("stale2", "carol@example.com", past)
@@ -103,11 +103,11 @@ class TestSqlTokenStore:
             [
                 {
                     "email": "alice@example.com",
-                    "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
                 }
             ],  # get_email result
         ]
-        expires = datetime.now(timezone.utc) + timedelta(hours=1)
+        expires = datetime.now(UTC) + timedelta(hours=1)
         await store.store_token("hash1", "alice@example.com", expires)
         email = await store.get_email("hash1")
         assert email == "alice@example.com"

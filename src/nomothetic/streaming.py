@@ -12,7 +12,6 @@ StreamServer
 
 import hmac
 import threading
-from typing import Optional
 
 try:
     from flask import Flask, Response, render_template_string, request
@@ -152,8 +151,8 @@ class StreamServer:
         height: int = 720,
         fps: int = 30,
         encoder: str = "h264",
-        camera: Optional[Camera] = None,
-        access_token: Optional[str] = None,
+        camera: Camera | None = None,
+        access_token: str | None = None,
     ) -> None:
         """Initialize the streaming server.
 
@@ -230,16 +229,16 @@ class StreamServer:
 
         # Thread synchronization for frame sharing
         self._frame_lock = threading.Lock()
-        self._current_frame: Optional[bytes] = None
+        self._current_frame: bytes | None = None
 
         # Stop event — set to request server and streaming generators to halt
         self._stop_event = threading.Event()
 
         # Werkzeug BaseWSGIServer handle — populated by start()
-        self._httpd: Optional[BaseWSGIServer] = None
+        self._httpd: BaseWSGIServer | None = None
 
         # Background thread handle — populated by start_background()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
 
         # Create Flask app
         self.app = Flask(__name__)

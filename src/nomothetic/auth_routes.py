@@ -7,7 +7,7 @@ All endpoints are tagged ``Auth`` in the OpenAPI docs.
 import hmac
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
@@ -199,7 +199,7 @@ def create_auth_router() -> APIRouter:
                 display_name=user.display_name,
                 created_at=user.created_at,
                 last_login_at=user.last_login_at,
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
             ),
         )
 
@@ -281,7 +281,7 @@ def create_auth_router() -> APIRouter:
             display_name=user.display_name,
             created_at=user.created_at,
             last_login_at=user.last_login_at,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @router.patch("/me", response_model=UserResponse)
@@ -314,7 +314,7 @@ def create_auth_router() -> APIRouter:
             display_name=user.display_name,
             created_at=user.created_at,
             last_login_at=user.last_login_at,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @router.post("/change-password", response_model=ChangePasswordResponse)
@@ -348,7 +348,7 @@ def create_auth_router() -> APIRouter:
             ) from exc
         return ChangePasswordResponse(
             success=True,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @router.post("/logout", response_model=LogoutResponse)
@@ -364,7 +364,7 @@ def create_auth_router() -> APIRouter:
         await svc.revoke_refresh_token(request.refresh_token)
         return LogoutResponse(
             success=True,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     return router

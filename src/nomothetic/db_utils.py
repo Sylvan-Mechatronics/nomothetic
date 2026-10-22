@@ -4,8 +4,8 @@ Small helpers reused across multiple store modules (UserStore,
 TokenStore, FleetStore).
 """
 
-from datetime import datetime, timezone
-from typing import Any, Optional, Union
+from datetime import UTC, datetime
+from typing import Any
 
 # ArcadeDB's ``dateTimeFormat`` (millisecond precision, no timezone). A
 # DATETIME column silently stores ``null`` for any value that does not match
@@ -54,7 +54,7 @@ def coerce_count(rows: list[Any]) -> int:
     return 0
 
 
-def to_db_datetime(value: Union[str, datetime]) -> str:
+def to_db_datetime(value: str | datetime) -> str:
     """Format an ISO-8601 string or ``datetime`` for an ArcadeDB DATETIME column.
 
     The result is a UTC wall-clock timestamp in ArcadeDB's
@@ -81,13 +81,13 @@ def to_db_datetime(value: Union[str, datetime]) -> str:
     """
     dt = value if isinstance(value, datetime) else datetime.fromisoformat(value)
     if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc)
+        dt = dt.astimezone(UTC)
     # Format seconds, then append milliseconds (microseconds // 1000).
     ms = dt.microsecond // 1000
     return dt.strftime(_DB_DATETIME_FORMAT_SECONDS) + f".{ms:03d}"
 
 
-def db_datetime_to_iso(value: Any) -> Optional[str]:
+def db_datetime_to_iso(value: Any) -> str | None:
     """Convert a value read from an ArcadeDB DATETIME column back to ISO-8601.
 
     Inverse of :func:`to_db_datetime`. The stored wall-clock is interpreted as
@@ -117,7 +117,7 @@ def db_datetime_to_iso(value: Any) -> Optional[str]:
             dt = datetime.fromisoformat(text)
         except ValueError:
             # Try both old (second) and new (millisecond) formats.
-            parse_error: Optional[ValueError] = None
+            parse_error: ValueError | None = None
             dt = None
             for fmt in _DB_DATETIME_FORMATS:
                 try:
@@ -129,5 +129,5 @@ def db_datetime_to_iso(value: Any) -> Optional[str]:
                 raise ValueError(f"Could not parse datetime: {text}") from parse_error
     assert isinstance(dt, datetime)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).isoformat()
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC).isoformat()

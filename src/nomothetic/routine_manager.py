@@ -37,7 +37,7 @@ import sys
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -123,7 +123,7 @@ def validate_routine_params(params: Mapping[str, Any], schema: Mapping[str, Any]
 
 def _now_iso() -> str:
     """Return the current UTC time as an ISO 8601 string."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _resolve_autonomon_bin(catalog: Path | None) -> str:
@@ -645,7 +645,7 @@ class RoutineManager:
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=max(0.0, deadline - loop.time()))
                     break  # exited on its own, or via _terminate (stop/stop_all)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     reason = self._lapsed_reason(entry, loop.time())
                     if reason is None:
                         continue  # a heartbeat extended the lease; recompute
@@ -691,7 +691,7 @@ class RoutineManager:
                 proc.send_signal(signal.SIGINT)
             try:
                 await asyncio.wait_for(proc.wait(), timeout=self._config.grace_period_s)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(
                     "routine %r did not exit within %.0fs; killing",
                     entry.routine,

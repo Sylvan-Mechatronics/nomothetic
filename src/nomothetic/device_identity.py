@@ -23,7 +23,7 @@ import os
 import stat
 import tempfile
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from cryptography.hazmat.primitives import serialization
@@ -144,7 +144,7 @@ class DeviceIdentity:
         """
         if _eddsa_jwt is None:  # pragma: no cover
             raise RuntimeError("authlib is required for registration proofs")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         payload = {
             "iss": PROOF_ISSUER,
             "sub": vin,
