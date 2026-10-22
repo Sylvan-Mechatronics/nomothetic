@@ -14,7 +14,7 @@ derived from the lifecycle event type, the same mapping the device-local
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Optional, runtime_checkable
+from typing import TYPE_CHECKING, Any, runtime_checkable
 
 from pydantic import BaseModel, Field
 from typing_extensions import Protocol
@@ -73,7 +73,7 @@ class AutonomyRunItem(BaseModel):
     status: str
     started_at: str
     updated_at: str
-    ended_at: Optional[str] = None
+    ended_at: str | None = None
     event_count: int = 0
 
 
@@ -105,7 +105,7 @@ class AutonomyStore(Protocol):
         ...  # pragma: no cover
 
     async def get_runs(
-        self, vin: str, limit: int = 50, since: Optional[str] = None
+        self, vin: str, limit: int = 50, since: str | None = None
     ) -> list[AutonomyRunItem]:
         """Return runs for a device, most recently started first.
 
@@ -216,7 +216,7 @@ class InMemoryAutonomyStore:
         record.run.event_count = len(record.events)
 
     async def get_runs(
-        self, vin: str, limit: int = 50, since: Optional[str] = None
+        self, vin: str, limit: int = 50, since: str | None = None
     ) -> list[AutonomyRunItem]:
         """Return up to ``limit`` runs for the device, newest-started first."""
         records = list(self._runs.get(vin, {}).values())
@@ -319,7 +319,7 @@ class SqlAutonomyStore:
         )
 
     async def get_runs(
-        self, vin: str, limit: int = 50, since: Optional[str] = None
+        self, vin: str, limit: int = 50, since: str | None = None
     ) -> list[AutonomyRunItem]:
         """Return runs for the device, newest-started first."""
         params: dict[str, object] = {"vin": vin, "limit": max(limit, 0)}

@@ -1,6 +1,6 @@
 """Tests for shared DB helpers (count coercion + datetime formatting)."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -35,11 +35,11 @@ class TestToDbDatetime:
         assert to_db_datetime("2026-07-05T12:34:56") == "2026-07-05 12:34:56.000"
 
     def test_accepts_datetime_object(self):
-        dt = datetime(2026, 7, 5, 12, 34, 56, tzinfo=timezone.utc)
+        dt = datetime(2026, 7, 5, 12, 34, 56, tzinfo=UTC)
         assert to_db_datetime(dt) == "2026-07-05 12:34:56.000"
 
     def test_datetime_with_microseconds(self):
-        dt = datetime(2026, 7, 5, 12, 34, 56, 789123, tzinfo=timezone.utc)
+        dt = datetime(2026, 7, 5, 12, 34, 56, 789123, tzinfo=UTC)
         assert to_db_datetime(dt) == "2026-07-05 12:34:56.789"
 
     def test_invalid_string_raises(self):
@@ -65,11 +65,11 @@ class TestDbDatetimeToIso:
         assert db_datetime_to_iso("") is None
 
     def test_datetime_object_input(self):
-        dt = datetime(2026, 7, 5, 12, 34, 56, tzinfo=timezone.utc)
+        dt = datetime(2026, 7, 5, 12, 34, 56, tzinfo=UTC)
         assert db_datetime_to_iso(dt) == "2026-07-05T12:34:56+00:00"
 
     def test_datetime_with_microseconds(self):
-        dt = datetime(2026, 7, 5, 12, 34, 56, 789000, tzinfo=timezone.utc)
+        dt = datetime(2026, 7, 5, 12, 34, 56, 789000, tzinfo=UTC)
         assert db_datetime_to_iso(dt) == "2026-07-05T12:34:56.789000+00:00"
 
     def test_round_trip_is_stable(self):

@@ -34,9 +34,9 @@ import re
 import secrets
 import subprocess
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -121,7 +121,7 @@ class RecordRequest(BaseModel):
     """Video recording request."""
 
     filename: str = Field(..., description="Filename for video (no path)")
-    encoder: Optional[str] = Field(default="h264", description="Video encoder: h264 or mjpeg")
+    encoder: str | None = Field(default="h264", description="Video encoder: h264 or mjpeg")
 
 
 class RecordStartResponse(BaseModel):
@@ -209,7 +209,7 @@ class McuStatusResponse(BaseModel):
     """MCU reset statistics response."""
 
     resets_since_start: int
-    last_reset_s_ago: Optional[int]
+    last_reset_s_ago: int | None
     timestamp: str
 
 
@@ -370,10 +370,10 @@ class SpeakerResponse(BaseModel):
 class StreamStartRequest(BaseModel):
     """Stream server start request (all fields optional — defaults from config)."""
 
-    host: Optional[str] = Field(
+    host: str | None = Field(
         default=None, description="Bind host (default: from config or 0.0.0.0)"
     )
-    port: Optional[int] = Field(
+    port: int | None = Field(
         default=None, ge=1, le=65535, description="Port (default: from config or 8000)"
     )
 
@@ -384,10 +384,10 @@ class StreamStartResponse(BaseModel):
     url: str
     host: str
     port: int
-    token: Optional[str] = None
+    token: str | None = None
     """Access token the client must send as ``?token=`` on every request to
     the stream server (which runs outside the authenticated REST API)."""
-    live_path: Optional[str] = None
+    live_path: str | None = None
     """Path (relative to this same HTTPS/TLS origin) that relays the MJPEG
     stream over the authenticated REST API's TLS connection instead of the
     stream server's own plain-HTTP host/port. Clients should join this with
@@ -408,7 +408,7 @@ class StreamStatusResponse(BaseModel):
     """Current stream server status."""
 
     running: bool
-    url: Optional[str]
+    url: str | None
     timestamp: str
 
 
@@ -420,7 +420,7 @@ class StreamStatusResponse(BaseModel):
 class AudioRecordStartRequest(BaseModel):
     """Start audio recording request."""
 
-    filename: Optional[str] = Field(
+    filename: str | None = Field(
         default=None,
         description="Output WAV filename (basename only). Auto-generated if absent.",
     )
@@ -438,7 +438,7 @@ class AudioRecordStopResponse(BaseModel):
     """Audio recording stopped."""
 
     recording: bool
-    filename: Optional[str]
+    filename: str | None
     timestamp: str
 
 
@@ -479,9 +479,9 @@ class AudioStatusResponse(BaseModel):
     """Current audio recorder and player state."""
 
     recording: bool
-    recording_file: Optional[str]
+    recording_file: str | None
     playing: bool
-    playback_file: Optional[str]
+    playback_file: str | None
     timestamp: str
 
 
@@ -518,9 +518,9 @@ class MicGainResponse(BaseModel):
 class MotorCalibrationRequest(BaseModel):
     """Request body for setting motor calibration (all fields optional)."""
 
-    speed_scale: Optional[float] = Field(default=None, ge=0.5, le=2.0)
-    deadband_pct: Optional[float] = Field(default=None, ge=0.0, le=20.0)
-    reversed: Optional[bool] = None
+    speed_scale: float | None = Field(default=None, ge=0.5, le=2.0)
+    deadband_pct: float | None = Field(default=None, ge=0.0, le=20.0)
+    reversed: bool | None = None
 
 
 class MotorCalibrationResponse(BaseModel):
@@ -596,16 +596,16 @@ class RoutineStartRequest(BaseModel):
     """Body for ``POST /api/routine/start``."""
 
     name: str = Field(description="Routine name.  Currently only 'explore' is supported.")
-    speed_pct: Optional[float] = Field(
+    speed_pct: float | None = Field(
         default=None, ge=1.0, le=100.0, description="Forward speed override (1–100 %)."
     )
-    obstacle_threshold_cm: Optional[float] = Field(
+    obstacle_threshold_cm: float | None = Field(
         default=None, gt=0.0, description="Obstacle detection distance in cm."
     )
-    cliff_threshold_normalized: Optional[float] = Field(
+    cliff_threshold_normalized: float | None = Field(
         default=None, ge=0.0, le=1.0, description="Normalised grayscale cliff threshold (0–1)."
     )
-    max_duration_s: Optional[int] = Field(
+    max_duration_s: int | None = Field(
         default=None, ge=1, description="Maximum run time in seconds."
     )
 
@@ -633,10 +633,10 @@ class RoutineStatusResponse(BaseModel):
     """Current routine status."""
 
     running: bool
-    name: Optional[str] = None
-    elapsed_s: Optional[int] = None
-    obstacles_avoided: Optional[int] = None
-    cliffs_avoided: Optional[int] = None
+    name: str | None = None
+    elapsed_s: int | None = None
+    obstacles_avoided: int | None = None
+    cliffs_avoided: int | None = None
     timestamp: str
 
 
@@ -821,8 +821,8 @@ def create_self_signed_cert(cert_path: Path, key_path: Path) -> None:
         .issuer_name(issuer)
         .public_key(private_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.now(timezone.utc))
-        .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365 * 10))
+        .not_valid_before(datetime.now(UTC))
+        .not_valid_after(datetime.now(UTC) + timedelta(days=365 * 10))
         .add_extension(
             x509.SubjectAlternativeName(_build_san_entries(IPv4Address)),
             critical=False,
@@ -888,8 +888,8 @@ def provision_tls_cert(cert_path: Path, key_path: Path) -> str:
                 cert = x509.load_pem_x509_certificate(f.read(), default_backend())
             expiry = getattr(cert, "not_valid_after_utc", None)
             if expiry is None:
-                expiry = cert.not_valid_after.replace(tzinfo=timezone.utc)
-            remaining = expiry - datetime.now(timezone.utc)
+                expiry = cert.not_valid_after.replace(tzinfo=UTC)
+            remaining = expiry - datetime.now(UTC)
             if remaining > timedelta(days=7):
                 logger.info("TLS cert valid for %d more days, reusing.", remaining.days)
                 return "existing"
@@ -986,9 +986,9 @@ def provision_tls_cert(cert_path: Path, key_path: Path) -> str:
 # ============================================================================
 
 
-_camera: Optional[Camera] = None
-_hat_client: Optional[HatClient] = None
-_stream_server: Optional[StreamServer] = None
+_camera: Camera | None = None
+_hat_client: HatClient | None = None
+_stream_server: StreamServer | None = None
 # Loopback by default (review finding S-8): the MJPEG server is plain HTTP and
 # token-in-URL; clients get the stream over TLS via /api/stream/live instead.
 _stream_host: str = "127.0.0.1"
@@ -1014,8 +1014,8 @@ def _truthy_env(name: str) -> bool:
 
 # Per-run access token required by the MJPEG stream server (regenerated on
 # every stream start; None while no stream is running).
-_stream_token: Optional[str] = None
-_audio_recorder: Optional[AudioRecorder] = None
+_stream_token: str | None = None
+_audio_recorder: AudioRecorder | None = None
 
 
 def _parse_int_env(name: str, default: int, lo: int = 0, hi: int = 100) -> int:
@@ -1052,7 +1052,7 @@ def _parse_int_env(name: str, default: int, lo: int = 0, hi: int = 100) -> int:
 # Default audio levels read from env vars (set by start.sh from config.toml).
 _default_volume_pct: int = _parse_int_env("NOMON_AUDIO_VOLUME", 80)
 _default_mic_gain_pct: int = _parse_int_env("NOMON_AUDIO_MIC_GAIN", 80)
-_audio_player: Optional[AudioPlayer] = None
+_audio_player: AudioPlayer | None = None
 _media_dir: Path = Path("~/perceptua-nomon/media").expanduser()
 
 
@@ -1591,7 +1591,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         return GrayscaleResponse(
             channels=result.channels,
             values=result.values,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.get("/api/sensor/ultrasonic", response_model=UltrasonicResponse, tags=["Sensor"])
@@ -1617,7 +1617,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
             500 on hardware error (GPIO failure) or unexpected IPC errors.
         """
         hat = _require_hat()
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         try:
             result = await asyncio.to_thread(hat.read_ultrasonic)
         except HatConnectionError as e:
@@ -1662,7 +1662,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         return DriveResponse(
             speed_pct=request.speed_pct,
             motors=motors,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post("/api/steer", response_model=SteerResponse, tags=["Vehicle"])
@@ -1688,7 +1688,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         await _hat_call("steer", request.angle_deg, request.ttl_ms)
         return SteerResponse(
             angle_deg=request.angle_deg,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post("/api/camera/pan", response_model=PanResponse, tags=["Vehicle"])
@@ -1714,7 +1714,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         await _hat_call("pan_camera", request.angle_deg, request.ttl_ms)
         return PanResponse(
             angle_deg=request.angle_deg,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post("/api/camera/tilt", response_model=TiltResponse, tags=["Vehicle"])
@@ -1740,7 +1740,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         await _hat_call("tilt_camera", request.angle_deg, request.ttl_ms)
         return TiltResponse(
             angle_deg=request.angle_deg,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     # ========================================================================
@@ -1797,7 +1797,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
                 live_path=(
                     f"/api/stream/live?token={_stream_token}" if _stream_token is not None else None
                 ),
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
             )
 
         # The MJPEG server runs outside the JWT-authenticated API, so gate it
@@ -1818,7 +1818,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
             port=port,
             token=token,
             live_path=f"/api/stream/live?token={token}",
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post("/api/stream/stop", response_model=StreamStopResponse, tags=["Stream"])
@@ -1837,7 +1837,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         if _stream_server is None:
             return StreamStopResponse(
                 success=False,
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
             )
         server = _stream_server
         _stream_server = None
@@ -1848,7 +1848,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
             pass
         return StreamStopResponse(
             success=True,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.get("/api/stream/status", response_model=StreamStatusResponse, tags=["Stream"])
@@ -1863,7 +1863,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         return StreamStatusResponse(
             running=running,
             url=url,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @app.get("/api/stream/live", tags=["Stream"])
@@ -1936,7 +1936,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
             resolution=f"{cam.width}x{cam.height}",
             fps=cam.fps,
             encoder=cam.encoder,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post("/api/camera/capture", response_model=CaptureResponse, tags=["Camera"])
@@ -1965,7 +1965,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
             return CaptureResponse(
                 success=True,
                 filename=request.filename,
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 message=f"Image captured: {request.filename}",
             )
         except ValueError as e:
@@ -2034,7 +2034,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
             return RecordStartResponse(
                 success=True,
                 filename=request.filename,
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 message=f"Recording started: {request.filename}",
             )
         except ValueError as e:
@@ -2067,7 +2067,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
             await asyncio.to_thread(cam.stop_recording)
             return RecordStopResponse(
                 success=True,
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 message="Recording stopped",
             )
         except Exception as e:
@@ -2139,7 +2139,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         return AudioRecordStartResponse(
             recording=True,
             filename=Path(recording_path).name,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post(
@@ -2166,7 +2166,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         return AudioRecordStopResponse(
             recording=False,
             filename=Path(recording_path).name if recording_path else None,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post("/api/audio/play", response_model=AudioPlayResponse, tags=["Audio"])
@@ -2231,7 +2231,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         return AudioPlayResponse(
             playing=True,
             filename=Path(current).name if current else request.filename,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post(
@@ -2259,7 +2259,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
 
         return AudioPlayStopResponse(
             success=True,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.get("/api/audio/files", response_model=AudioFilesResponse, tags=["Audio"])
@@ -2274,7 +2274,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         files = await asyncio.to_thread(list_audio_files, _media_dir / "audio")
         return AudioFilesResponse(
             files=files,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.get("/api/audio/status", response_model=AudioStatusResponse, tags=["Audio"])
@@ -2287,7 +2287,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
             recording_file=Path(rec_file).name if rec_file else None,
             playing=_audio_player.is_playing if _audio_player else False,
             playback_file=Path(play_file).name if play_file else None,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post("/api/audio/volume", response_model=VolumeResponse, tags=["Audio"])
@@ -2313,7 +2313,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         await _hat_call("set_volume", request.volume_pct)
         return VolumeResponse(
             volume_pct=request.volume_pct,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.get("/api/audio/volume", response_model=VolumeResponse, tags=["Audio"])
@@ -2334,7 +2334,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         pct = await _hat_call("get_volume")
         return VolumeResponse(
             volume_pct=pct,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post("/api/audio/mic-gain", response_model=MicGainResponse, tags=["Audio"])
@@ -2360,7 +2360,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         await _hat_call("set_mic_gain", request.gain_pct)
         return MicGainResponse(
             gain_pct=request.gain_pct,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.get("/api/audio/mic-gain", response_model=MicGainResponse, tags=["Audio"])
@@ -2381,7 +2381,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         pct = await _hat_call("get_mic_gain")
         return MicGainResponse(
             gain_pct=pct,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     # ========================================================================
@@ -2416,7 +2416,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
                 )
                 for i, g in enumerate(snap.grayscale)
             ],
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.put(
@@ -2445,7 +2445,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
             speed_scale=entry.speed_scale,
             deadband_pct=entry.deadband_pct,
             reversed=entry.reversed,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.put(
@@ -2466,7 +2466,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         return ServoCalibrationResponse(
             servo=entry.servo,
             trim_us=entry.trim_us,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post(
@@ -2490,7 +2490,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
             surface=result.surface,
             raw_value=result.raw_value,
             stored=result.stored,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post(
@@ -2502,7 +2502,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         return SaveCalibrationResponse(
             saved=result.saved,
             path=result.path,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post(
@@ -2513,7 +2513,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         reset = await _hat_call("reset_calibration")
         return ResetCalibrationResponse(
             reset=reset,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.get(
@@ -2527,7 +2527,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         return NormalizedGrayscaleResponse(
             channels=result.channels,
             normalized=result.normalized,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     # ========================================================================
@@ -2552,7 +2552,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         voltage = await _hat_call("get_battery_voltage")
         return BatteryResponse(
             voltage_v=voltage,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post("/api/hat/servo", response_model=ServoResponse, tags=["HAT"])
@@ -2584,7 +2584,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         return ServoResponse(
             channel=request.channel,
             angle_deg=request.angle_deg,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post("/api/hat/reset", response_model=ResetResponse, tags=["HAT"])
@@ -2605,7 +2605,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         await _hat_call("reset_mcu")
         return ResetResponse(
             success=True,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.get("/api/hat/servo/status", response_model=ServoStatusResponse, tags=["HAT"])
@@ -2633,7 +2633,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
                 )
                 for e in status.active_leases
             ],
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.get("/api/hat/mcu/status", response_model=McuStatusResponse, tags=["HAT"])
@@ -2655,7 +2655,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         return McuStatusResponse(
             resets_since_start=status.resets_since_start,
             last_reset_s_ago=status.last_reset_s_ago,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post("/api/hat/motor", response_model=MotorResponse, tags=["HAT"])
@@ -2687,7 +2687,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         return MotorResponse(
             channel=request.channel,
             speed_pct=request.speed_pct,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post("/api/hat/motor/stop", response_model=StopMotorsResponse, tags=["HAT"])
@@ -2708,7 +2708,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         stopped = await _hat_call("stop_all_motors")
         return StopMotorsResponse(
             stopped=stopped,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.get("/api/hat/motor/status", response_model=MotorStatusResponse, tags=["HAT"])
@@ -2736,7 +2736,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
                 )
                 for e in status.active_leases
             ],
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post("/api/hat/speaker", response_model=SpeakerResponse, tags=["HAT"])
@@ -2766,7 +2766,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         await _hat_call(method)
         return SpeakerResponse(
             enabled=request.enabled,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     # ========================================================================
@@ -2801,7 +2801,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         return RoutineStartResponse(
             name=result.name,
             started_at_uptime_s=result.started_at_uptime_s,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post("/api/routine/stop", response_model=RoutineStopResponse, tags=["Routine"])
@@ -2825,7 +2825,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
             obstacles_avoided=result.obstacles_avoided,
             cliffs_avoided=result.cliffs_avoided,
             stop_reason=result.stop_reason,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.get(
@@ -2840,7 +2840,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
             elapsed_s=result.elapsed_s,
             obstacles_avoided=result.obstacles_avoided,
             cliffs_avoided=result.cliffs_avoided,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @device_router.post(
@@ -2905,7 +2905,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
                         proc.communicate(input=stdin_data),
                         timeout=30,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     proc.kill()
                     await proc.communicate()
                     logger.warning("nmcli wifi connect timed out for SSID %r", ssid)
@@ -2997,7 +2997,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         ap_status = await asyncio.to_thread(_run_script)
         return WifiApResponse(
             status=ap_status,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     # Include all device endpoints (with or without auth dependency)
@@ -3070,7 +3070,7 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=exc.status_code,
             content=ErrorResponse(
-                error=exc.detail, timestamp=datetime.now(timezone.utc).isoformat()
+                error=exc.detail, timestamp=datetime.now(UTC).isoformat()
             ).model_dump(),
         )
 
@@ -3114,7 +3114,7 @@ class APIServer:
         host: str = "127.0.0.1",
         port: int = 8443,
         use_ssl: bool = True,
-        cert_dir: Optional[Path] = None,
+        cert_dir: Path | None = None,
         reload: bool = False,
     ):
         if not 1 <= port <= 65535:

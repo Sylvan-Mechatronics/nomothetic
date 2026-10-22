@@ -6,7 +6,7 @@ ArcadeDB persistence behind the same interface.
 """
 
 import logging
-from typing import TYPE_CHECKING, Any, Optional, runtime_checkable
+from typing import TYPE_CHECKING, Any, runtime_checkable
 
 from typing_extensions import Protocol
 
@@ -31,7 +31,7 @@ _ALLOWED_USER_UPDATE_FIELDS = frozenset({"display_name", "last_login_at", "activ
 class UserStore(Protocol):
     """Abstract interface for user persistence."""
 
-    async def get_user(self, email: str) -> Optional[UserRecord]:
+    async def get_user(self, email: str) -> UserRecord | None:
         """Look up a user by email.
 
         Parameters
@@ -72,7 +72,7 @@ class UserStore(Protocol):
         """
         ...  # pragma: no cover
 
-    async def update_user(self, email: str, **fields: str) -> Optional[UserRecord]:
+    async def update_user(self, email: str, **fields: str) -> UserRecord | None:
         """Update mutable fields on an existing user.
 
         Parameters
@@ -139,7 +139,7 @@ class InMemoryUserStore:
     def __init__(self) -> None:
         self._users: dict[str, UserRecord] = {}
 
-    async def get_user(self, email: str) -> Optional[UserRecord]:
+    async def get_user(self, email: str) -> UserRecord | None:
         """Return the user record for *email*, or ``None``."""
         return self._users.get(email)
 
@@ -169,7 +169,7 @@ class InMemoryUserStore:
         self._users[email] = record
         return record
 
-    async def update_user(self, email: str, **fields: str) -> Optional[UserRecord]:
+    async def update_user(self, email: str, **fields: str) -> UserRecord | None:
         """Update fields on an existing user record.
 
         Returns ``None`` if the user does not exist.
@@ -215,7 +215,7 @@ class SqlUserStore:
     def __init__(self, db: "DatabaseClient") -> None:
         self._db = db
 
-    async def get_user(self, email: str) -> Optional[UserRecord]:
+    async def get_user(self, email: str) -> UserRecord | None:
         """Fetch a user by email."""
         query = (
             "SELECT email, display_name, password_hash, created_at,"
@@ -271,7 +271,7 @@ class SqlUserStore:
             active=True,
         )
 
-    async def update_user(self, email: str, **fields: str) -> Optional[UserRecord]:
+    async def update_user(self, email: str, **fields: str) -> UserRecord | None:
         """Update properties on an existing User record."""
         for key in fields:
             if key not in _ALLOWED_USER_UPDATE_FIELDS:

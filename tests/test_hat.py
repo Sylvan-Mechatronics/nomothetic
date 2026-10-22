@@ -200,7 +200,7 @@ def _run_mock_server(
         while connections_handled < max_connections:
             try:
                 conn, _ = srv.accept()
-            except socket.timeout:
+            except TimeoutError:
                 break
             t = threading.Thread(target=_handle, args=(conn,), daemon=True)
             t.start()

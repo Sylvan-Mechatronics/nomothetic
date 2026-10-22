@@ -24,8 +24,8 @@ auth. Endpoints:
 
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 def _now() -> str:
     """Return the current UTC time as an ISO 8601 string."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +59,7 @@ class RoutineStartRequest(BaseModel):
     params: dict[str, Any] = Field(
         default_factory=dict, description="Routine parameters forwarded to the plugin"
     )
-    heartbeat_timeout_s: Optional[float] = Field(
+    heartbeat_timeout_s: float | None = Field(
         default=None,
         ge=5,
         le=86400,
@@ -69,7 +69,7 @@ class RoutineStartRequest(BaseModel):
             "its ceiling. Send POST /api/routines/heartbeat within this window."
         ),
     )
-    max_duration_s: Optional[float] = Field(
+    max_duration_s: float | None = Field(
         default=None,
         gt=0,
         le=86400,
@@ -100,7 +100,7 @@ class RoutineRunInfo(BaseModel):
     pid: int
     started_at: str
     heartbeat_timeout_s: float
-    max_duration_s: Optional[float]
+    max_duration_s: float | None
     status: str
 
 
@@ -138,7 +138,7 @@ class RoutineCatalogResponse(BaseModel):
 
     routines: list[str]
     params_schema: dict[str, Any]
-    version: Optional[str]
+    version: str | None
     timestamp: str
 
 
@@ -163,7 +163,7 @@ def create_routine_control_router() -> APIRouter:
     router = APIRouter(prefix="/api/routines", tags=["Routines"])
 
     def _manager(request: Request) -> RoutineManager:
-        manager: Optional[RoutineManager] = getattr(request.app.state, "routine_manager", None)
+        manager: RoutineManager | None = getattr(request.app.state, "routine_manager", None)
         if manager is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

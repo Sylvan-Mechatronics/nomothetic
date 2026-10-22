@@ -16,7 +16,6 @@ Camera
 """
 
 from pathlib import Path
-from typing import Optional, Union
 
 try:
     from picamera2 import Picamera2
@@ -73,8 +72,8 @@ class Camera:
         height: int = 720,
         fps: int = 30,
         encoder: str = "h264",
-        directory: Optional[Union[str, Path]] = None,
-        photo_directory: Optional[Union[str, Path]] = None,
+        directory: str | Path | None = None,
+        photo_directory: str | Path | None = None,
     ) -> None:
         """Initialize the camera.
 

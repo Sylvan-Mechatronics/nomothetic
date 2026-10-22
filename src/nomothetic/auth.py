@@ -11,7 +11,7 @@ import os
 import secrets
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Optional
 
 from fastapi import Depends, HTTPException, Request, status
@@ -87,7 +87,7 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 # Lazily-computed bcrypt hash of a throwaway value, compared against when a
 # login email is unknown so the response takes the same time as a wrong
 # password (prevents user enumeration via timing).  Computed once per process.
-_timing_equalizer_hash: Optional[str] = None
+_timing_equalizer_hash: str | None = None
 
 
 def _get_timing_equalizer_hash() -> str:
@@ -124,7 +124,7 @@ class UserRecord(BaseModel):
     display_name: str
     password_hash: str
     created_at: str
-    last_login_at: Optional[str] = None
+    last_login_at: str | None = None
     active: bool = True
 
 
@@ -151,7 +151,7 @@ class AuthService:
 
     def __init__(
         self,
-        secret: Optional[str] = None,
+        secret: str | None = None,
         user_store: Optional["UserStore"] = None,
         token_store: Optional["TokenStore"] = None,
         issuer: str = "nomon-central",
@@ -247,10 +247,10 @@ class AuthService:
             email=normalised,
             display_name=display_name,
             password_hash=self.hash_password(password),
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
         )
 
-    async def authenticate(self, email: str, password: str) -> Optional[UserRecord]:
+    async def authenticate(self, email: str, password: str) -> UserRecord | None:
         """Authenticate a user by email and password.
 
         Parameters
@@ -274,14 +274,14 @@ class AuthService:
             return None
         if not self.verify_password(password, user.password_hash):
             return None
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         user.last_login_at = now.isoformat()
         await self._user_store.update_user(
             normalised, last_login_at=now.strftime("%Y-%m-%d %H:%M:%S")
         )
         return user
 
-    async def get_user(self, email: str) -> Optional[UserRecord]:
+    async def get_user(self, email: str) -> UserRecord | None:
         """Look up a user by email.
 
         Parameters
@@ -295,7 +295,7 @@ class AuthService:
         """
         return await self._user_store.get_user(email.strip().lower())
 
-    async def update_display_name(self, email: str, display_name: str) -> Optional[UserRecord]:
+    async def update_display_name(self, email: str, display_name: str) -> UserRecord | None:
         """Update a user's display name.
 
         Parameters
@@ -361,7 +361,7 @@ class AuthService:
         str
             Encoded JWT string.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         payload = {
             "sub": email,
             "iat": int(now.timestamp()),
@@ -399,7 +399,7 @@ class AuthService:
         str
             Encoded JWT string.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         payload = {
             "sub": f"{_PLUGIN_SUB_PREFIX}{plugin_name}",
             "iat": int(now.timestamp()),
@@ -437,7 +437,7 @@ class AuthService:
         str
             Encoded JWT proof string.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         payload = {
             "iss": self._issuer,
             "sub": vin,
@@ -465,7 +465,7 @@ class AuthService:
         """
         raw = secrets.token_urlsafe(48)
         token_hash = hashlib.sha256(raw.encode()).hexdigest()
-        expires_at = datetime.now(timezone.utc) + _REFRESH_TOKEN_TTL
+        expires_at = datetime.now(UTC) + _REFRESH_TOKEN_TTL
         await self._token_store.store_token(token_hash, email.strip().lower(), expires_at)
         return raw
 
@@ -600,7 +600,7 @@ class AuthService:
 # ---------------------------------------------------------------------------
 
 # Module-level reference set by create_app() at startup.
-_auth_service: Optional[AuthService] = None
+_auth_service: AuthService | None = None
 
 
 def set_auth_service(service: AuthService) -> None:
@@ -609,13 +609,13 @@ def set_auth_service(service: AuthService) -> None:
     _auth_service = service
 
 
-def get_auth_service() -> Optional[AuthService]:
+def get_auth_service() -> AuthService | None:
     """Return the current AuthService instance (if configured)."""
     return _auth_service
 
 
 async def jwt_required(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> TokenPayload:
     """FastAPI dependency that enforces a valid JWT access token.
 

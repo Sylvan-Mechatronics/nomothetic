@@ -24,8 +24,8 @@ shapes onto the listener, mirroring :mod:`nomothetic.ai_routes`.
 """
 
 import asyncio
-from datetime import datetime, timezone
-from typing import Annotated, Optional
+from datetime import UTC, datetime
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -35,7 +35,7 @@ from nomothetic.wake import WakeWordListener
 
 def _now() -> str:
     """Return the current UTC time as an ISO 8601 string."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ class WakeStatusResponse(BaseModel):
     running: bool
     paused: bool
     state: str
-    phrase: Optional[str] = Field(default=None, description="null when unconfigured")
+    phrase: str | None = Field(default=None, description="null when unconfigured")
     variants: list[str]
     followup_window_s: float
     timestamp: str
@@ -63,11 +63,12 @@ class WakeUpdateRequest(BaseModel):
     request is a no-op that returns the current status.
     """
 
-    enabled: Optional[bool] = None
-    phrase: Optional[Annotated[str, Field(min_length=1, max_length=64)]] = None
-    variants: Optional[
+    enabled: bool | None = None
+    phrase: Annotated[str, Field(min_length=1, max_length=64)] | None = None
+    variants: (
         Annotated[list[Annotated[str, Field(min_length=1, max_length=64)]], Field(max_length=8)]
-    ] = None
+        | None
+    ) = None
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +90,7 @@ def create_wake_router() -> APIRouter:
     router = APIRouter(prefix="/api/voice/wake", tags=["Voice"])
 
     def _listener(request: Request) -> WakeWordListener:
-        listener: Optional[WakeWordListener] = getattr(request.app.state, "wake_listener", None)
+        listener: WakeWordListener | None = getattr(request.app.state, "wake_listener", None)
         if listener is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

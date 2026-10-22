@@ -17,10 +17,11 @@ provider requests and transcription is CPU-heavy on the Pi.
 """
 
 import asyncio
+import itertools
 import logging
 import os
-from datetime import datetime, timezone
-from typing import Any, Literal, Optional
+from datetime import UTC, datetime
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field, model_validator
@@ -52,7 +53,7 @@ def _max_audio_bytes() -> int:
 
 def _now() -> str:
     """Return the current UTC time as an ISO 8601 string."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +80,7 @@ class AiCommandRequest(BaseModel):
             raise ValueError("first message must have role 'user'")
         if self.messages[-1].role != "user":
             raise ValueError("last message must have role 'user'")
-        for prev, nxt in zip(self.messages, self.messages[1:]):
+        for prev, nxt in itertools.pairwise(self.messages):
             if prev.role == nxt.role:
                 raise ValueError("message roles must alternate between 'user' and 'assistant'")
         return self
@@ -92,7 +93,7 @@ class AiActionRecord(BaseModel):
     input: dict[str, Any]
     ok: bool
     result: Any = None
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class AiCommandResponse(BaseModel):
@@ -115,7 +116,7 @@ class AiKeyStatusResponse(BaseModel):
     """Whether an AI key is configured and where it comes from — never the key itself."""
 
     configured: bool
-    source: Optional[str] = Field(default=None, description='"stored", "env", or null')
+    source: str | None = Field(default=None, description='"stored", "env", or null')
     timestamp: str
 
 
@@ -147,7 +148,7 @@ def create_ai_router() -> APIRouter:
     router = APIRouter(prefix="/api/ai", tags=["AI"])
 
     def _key_store(request: Request) -> AiKeyStore:
-        store: Optional[AiKeyStore] = getattr(request.app.state, "ai_key_store", None)
+        store: AiKeyStore | None = getattr(request.app.state, "ai_key_store", None)
         if store is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -156,7 +157,7 @@ def create_ai_router() -> APIRouter:
         return store
 
     def _service(request: Request) -> AiCommandService:
-        service: Optional[AiCommandService] = getattr(request.app.state, "ai_service", None)
+        service: AiCommandService | None = getattr(request.app.state, "ai_service", None)
         if service is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -165,7 +166,7 @@ def create_ai_router() -> APIRouter:
         return service
 
     def _stt_engine(request: Request) -> SttEngine:
-        engine: Optional[SttEngine] = getattr(request.app.state, "stt_engine", None)
+        engine: SttEngine | None = getattr(request.app.state, "stt_engine", None)
         if engine is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

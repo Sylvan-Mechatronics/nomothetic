@@ -18,8 +18,8 @@ Endpoints (all inherit the device router's auth — a device JWT in device mode)
 """
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from pydantic import BaseModel, Field
@@ -35,7 +35,7 @@ _MAX_LOG_LIMIT = 500
 
 def _now() -> str:
     """Return the current UTC time as an ISO 8601 string."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -48,9 +48,9 @@ class RoutineEventRequest(BaseModel):
 
     type: str = Field(..., min_length=1, max_length=32, description="Lifecycle event type")
     data: dict[str, Any] = Field(default_factory=dict, description="Event payload")
-    run_id: Optional[str] = Field(default=None, max_length=64, description="Per-run identifier")
-    device_id: Optional[str] = Field(default=None, max_length=128)
-    timestamp: Optional[str] = Field(default=None, description="Event time (ISO 8601)")
+    run_id: str | None = Field(default=None, max_length=64, description="Per-run identifier")
+    device_id: str | None = Field(default=None, max_length=128)
+    timestamp: str | None = Field(default=None, description="Event time (ISO 8601)")
 
 
 class RoutineEventAck(BaseModel):
@@ -58,7 +58,7 @@ class RoutineEventAck(BaseModel):
 
     routine: str
     status: str
-    run_id: Optional[str]
+    run_id: str | None
     timestamp: str
 
 
@@ -68,8 +68,8 @@ class RoutineLogEvent(BaseModel):
     timestamp: str
     type: str
     data: dict[str, Any]
-    run_id: Optional[str] = None
-    device_id: Optional[str] = None
+    run_id: str | None = None
+    device_id: str | None = None
 
 
 class RoutineLogResponse(BaseModel):
@@ -77,9 +77,9 @@ class RoutineLogResponse(BaseModel):
 
     routine: str
     status: str
-    run_id: Optional[str]
-    started_at: Optional[str]
-    updated_at: Optional[str]
+    run_id: str | None
+    started_at: str | None
+    updated_at: str | None
     event_count: int
     events: list[RoutineLogEvent]
     timestamp: str
@@ -90,9 +90,9 @@ class RoutineSummary(BaseModel):
 
     routine: str
     status: str
-    run_id: Optional[str]
-    started_at: Optional[str]
-    updated_at: Optional[str]
+    run_id: str | None
+    started_at: str | None
+    updated_at: str | None
     event_count: int
 
 
@@ -124,7 +124,7 @@ def create_routine_router() -> APIRouter:
     router = APIRouter(prefix="/api/routines", tags=["Routines"])
 
     def _store(request: Request) -> RoutineLogStore:
-        store: Optional[RoutineLogStore] = getattr(request.app.state, "routine_log_store", None)
+        store: RoutineLogStore | None = getattr(request.app.state, "routine_log_store", None)
         if store is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -177,7 +177,7 @@ def create_routine_router() -> APIRouter:
     async def get_logs(
         request: Request,
         routine: str = Path(..., min_length=1, max_length=64),
-        limit: Optional[int] = Query(default=None, ge=1, le=_MAX_LOG_LIMIT),
+        limit: int | None = Query(default=None, ge=1, le=_MAX_LOG_LIMIT),
     ):
         """Return the current status and recent events for *routine*.
 

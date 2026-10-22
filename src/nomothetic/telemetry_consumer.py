@@ -29,7 +29,7 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Optional
 
 from nomothetic.autonomy_store import AutonomyEventItem, AutonomyStore
@@ -50,7 +50,7 @@ _BACKOFF_CAP: float = 60.0
 
 def reading_from_payload(
     payload: dict[str, Any],
-) -> Optional[tuple[str, TelemetryReadingItem]]:
+) -> tuple[str, TelemetryReadingItem] | None:
     """Map a telemetry payload dict to ``(vin, TelemetryReadingItem)``.
 
     Returns ``None`` for an unusable payload (no ``device_id``), so a malformed
@@ -76,7 +76,7 @@ def reading_from_payload(
 
     recorded_at = payload.get("timestamp")
     if not isinstance(recorded_at, str) or not recorded_at:
-        recorded_at = datetime.now(timezone.utc).isoformat()
+        recorded_at = datetime.now(UTC).isoformat()
 
     item = TelemetryReadingItem(
         battery_voltage=_num("battery_voltage"),
@@ -89,7 +89,7 @@ def reading_from_payload(
 
 def autonomy_event_from_payload(
     payload: dict[str, Any],
-) -> Optional[tuple[str, str, str, AutonomyEventItem]]:
+) -> tuple[str, str, str, AutonomyEventItem] | None:
     """Map a forwarded autonomy payload to ``(vin, routine, run_id, event)``.
 
     Returns ``None`` for an unusable payload — one lacking a ``device_id``,
@@ -108,7 +108,7 @@ def autonomy_event_from_payload(
     tuple[str, str, str, AutonomyEventItem] or None
     """
 
-    def _req(key: str) -> Optional[str]:
+    def _req(key: str) -> str | None:
         val = payload.get(key)
         if not isinstance(val, str) or not val.strip():
             return None
@@ -127,7 +127,7 @@ def autonomy_event_from_payload(
 
     recorded_at = payload.get("timestamp")
     if not isinstance(recorded_at, str) or not recorded_at:
-        recorded_at = datetime.now(timezone.utc).isoformat()
+        recorded_at = datetime.now(UTC).isoformat()
 
     item = AutonomyEventItem(event_type=event_type, data=data, recorded_at=recorded_at)
     return vin, routine, run_id, item
@@ -171,12 +171,12 @@ class TelemetryConsumer:
         port: int = 1883,
         topic: str = "nomon/telemetry",
         qos: int = 1,
-        autonomy_store: Optional[AutonomyStore] = None,
+        autonomy_store: AutonomyStore | None = None,
         autonomy_topic: str = "nomon/autonomy",
-        username: Optional[str] = None,
-        password: Optional[str] = None,
+        username: str | None = None,
+        password: str | None = None,
         tls: bool = False,
-        ca_cert: Optional[str] = None,
+        ca_cert: str | None = None,
     ) -> None:
         if mqtt is None:
             raise ImportError(
@@ -196,8 +196,8 @@ class TelemetryConsumer:
         self.ca_cert = ca_cert
 
         self._stop_event = threading.Event()
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._thread: Optional[threading.Thread] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
         self._client: Any = self._create_client()
 
     # -------------------------------------------------------------------------
@@ -206,7 +206,7 @@ class TelemetryConsumer:
 
     @classmethod
     def from_env(
-        cls, store: TelemetryStore, autonomy_store: Optional[AutonomyStore] = None
+        cls, store: TelemetryStore, autonomy_store: AutonomyStore | None = None
     ) -> Optional["TelemetryConsumer"]:
         """Build a consumer from environment, or ``None`` when no broker is set.
 

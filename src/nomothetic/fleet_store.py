@@ -4,8 +4,8 @@ Protocol-based store abstraction for vehicle registration and fleet queries.
 """
 
 import logging
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional, runtime_checkable
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, runtime_checkable
 
 from pydantic import BaseModel
 from typing_extensions import Protocol
@@ -28,8 +28,8 @@ class DeviceItem(BaseModel):
 
     vin: str
     model: str
-    firmware_version: Optional[str] = None
-    last_seen_at: Optional[str] = None
+    firmware_version: str | None = None
+    last_seen_at: str | None = None
     registered_at: str
     role: str = "owner"
 
@@ -57,7 +57,7 @@ class FleetStore(Protocol):
         """
         ...  # pragma: no cover
 
-    async def get_device(self, owner_email: str, vin: str) -> Optional[DeviceItem]:
+    async def get_device(self, owner_email: str, vin: str) -> DeviceItem | None:
         """Look up a single device by VIN scoped to its owner.
 
         Parameters
@@ -97,7 +97,7 @@ class FleetStore(Protocol):
         """
         ...  # pragma: no cover
 
-    async def get_device_public_key(self, vin: str) -> Optional[str]:
+    async def get_device_public_key(self, vin: str) -> str | None:
         """Return the PEM public key pinned to *vin*, or ``None`` (review S-3)."""
         ...  # pragma: no cover
 
@@ -157,7 +157,7 @@ class InMemoryFleetStore:
         """Return all devices owned by the user."""
         return list(self._devices.get(owner_email, {}).values())
 
-    async def get_device(self, owner_email: str, vin: str) -> Optional[DeviceItem]:
+    async def get_device(self, owner_email: str, vin: str) -> DeviceItem | None:
         """Look up a single device by VIN scoped to user."""
         return self._devices.get(owner_email, {}).get(vin)
 
@@ -172,7 +172,7 @@ class InMemoryFleetStore:
         bucket = self._devices.setdefault(owner_email, {})
         if vin in bucket:
             raise ValueError(f"Device {vin} already registered")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         item = DeviceItem(
             vin=vin,
             model=model,
@@ -190,7 +190,7 @@ class InMemoryFleetStore:
         bucket = self._devices.get(owner_email, {})
         return bucket.pop(vin, None) is not None
 
-    async def get_device_public_key(self, vin: str) -> Optional[str]:
+    async def get_device_public_key(self, vin: str) -> str | None:
         return self._device_keys.get(vin)
 
     async def set_device_public_key(self, vin: str, public_key_pem: str) -> None:
@@ -247,7 +247,7 @@ class SqlFleetStore:
             )
         return items
 
-    async def get_device(self, owner_email: str, vin: str) -> Optional[DeviceItem]:
+    async def get_device(self, owner_email: str, vin: str) -> DeviceItem | None:
         """Fetch a single device by VIN scoped to the owner."""
         query = (
             "SELECT @in.vin as vin, @in.model as model,"
@@ -302,7 +302,7 @@ class SqlFleetStore:
                 "Please log out and log in again, then retry registration."
             )
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         # Create Vehicle if it doesn't exist
         count_q = "SELECT count(*) as count FROM Vehicle WHERE vin = :vin"
@@ -360,7 +360,7 @@ class SqlFleetStore:
         await self._db.execute_sql(query, {"email": owner_email, "vin": vin})
         return True
 
-    async def get_device_public_key(self, vin: str) -> Optional[str]:
+    async def get_device_public_key(self, vin: str) -> str | None:
         """Return ``Vehicle.device_public_key`` for *vin* (nomographic V5), or ``None``."""
         query = "SELECT device_public_key FROM Vehicle WHERE vin = :vin"
         rows = await self._db.execute_sql(query, {"vin": vin})

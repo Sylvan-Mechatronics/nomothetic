@@ -24,7 +24,7 @@ import asyncio
 import base64
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from ipaddress import ip_address
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 def _now() -> str:
     """Return the current UTC time as an ISO 8601 string."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ See ADR-012 for design rationale.
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 try:
     import httpx
@@ -123,9 +123,7 @@ class DatabaseClient:
             timeout=10.0,
         )
 
-    async def execute_gremlin(
-        self, query: str, params: Optional[dict] = None
-    ) -> list[dict[str, Any]]:
+    async def execute_gremlin(self, query: str, params: dict | None = None) -> list[dict[str, Any]]:
         """Execute a Gremlin query via the HTTP command endpoint.
 
         Parameters
@@ -147,7 +145,7 @@ class DatabaseClient:
         """
         return await self._execute("gremlin", query, params)
 
-    async def execute_sql(self, query: str, params: Optional[dict] = None) -> list[dict[str, Any]]:
+    async def execute_sql(self, query: str, params: dict | None = None) -> list[dict[str, Any]]:
         """Execute a SQL query via the HTTP command endpoint.
 
         Parameters
@@ -190,7 +188,7 @@ class DatabaseClient:
     # -- internal -----------------------------------------------------------
 
     async def _execute(
-        self, language: str, command: str, params: Optional[dict]
+        self, language: str, command: str, params: dict | None
     ) -> list[dict[str, Any]]:
         """Post a command to the ArcadeDB HTTP API.
 

@@ -12,10 +12,9 @@ import logging
 import os
 import secrets
 import socket
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -112,7 +111,7 @@ class DeviceIdentityResponse(BaseModel):
     identity key. Submit it to the central fleet registration endpoint with
     the VIN and ``device_public_key``; central verifies the signature and pins
     the key to the VIN on first registration (review finding S-3)."""
-    device_public_key: Optional[str] = None
+    device_public_key: str | None = None
     """PEM public key matching the proof signature (``None`` only on legacy
     builds without a device identity)."""
 
@@ -402,7 +401,7 @@ def create_device_auth_router() -> APIRouter:
         await _reset_device_session(pairing, svc, claims.sub)
         return SessionResetResponse(
             success=True,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @router.get("/me", response_model=DeviceUserResponse)
@@ -432,7 +431,7 @@ def create_device_auth_router() -> APIRouter:
             display_name=user.display_name,
             created_at=user.created_at,
             last_login_at=user.last_login_at,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
     @router.get(
@@ -465,7 +464,7 @@ def create_device_auth_router() -> APIRouter:
         identity_key = getattr(request.app.state, "device_identity", None)
         if identity_key is not None:
             proof = identity_key.create_registration_proof(vin)
-            public_key: Optional[str] = identity_key.public_key_pem
+            public_key: str | None = identity_key.public_key_pem
         else:  # legacy: unverifiable HS256 proof
             proof = svc.create_registration_proof(vin)
             public_key = None

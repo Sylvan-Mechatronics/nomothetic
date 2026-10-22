@@ -45,9 +45,9 @@ import threading
 import time
 import wave
 from array import array
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from nomothetic.ai_command import MOTION_TOOLS, AiProviderError, AiUnavailableError
 from nomothetic.audio import (
