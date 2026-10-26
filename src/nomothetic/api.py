@@ -852,7 +852,9 @@ def provision_tls_cert(cert_path: Path, key_path: Path) -> str:
 
     Runs on every API startup:
 
-    1. **Existing cert still valid** (>7 days remaining) → reuse as-is.
+    1. **Existing CA-issued cert still valid** (>7 days remaining) → reuse
+       as-is. A valid self-signed cert is not reused outright: Tailscale is
+       tried first, and the same self-signed cert is restored if that fails.
     2. **Tailscale available** → ``tailscale cert`` issues a Let's Encrypt-
        backed certificate for the node's MagicDNS FQDN, trusted by all
        major browsers and iOS with no manual trust setup.
@@ -879,21 +881,30 @@ def provision_tls_cert(cert_path: Path, key_path: Path) -> str:
         ``"self-signed"``.
     """
     # ── 1. Reuse existing cert if still valid ────────────────────────────
+    # A valid self-signed cert is only kept as the fallback: phones reject it,
+    # so Tailscale is retried on every start until a trusted cert is issued.
+    # Its bytes are held so a failed attempt restores the same cert rather
+    # than minting a new one that clients would have to re-trust.
+    self_signed_pair: tuple[bytes, bytes] | None = None
     if cert_path.exists() and key_path.exists():
         try:
             from cryptography import x509
             from cryptography.hazmat.backends import default_backend
 
-            with open(cert_path, "rb") as f:
-                cert = x509.load_pem_x509_certificate(f.read(), default_backend())
+            cert_pem = cert_path.read_bytes()
+            cert = x509.load_pem_x509_certificate(cert_pem, default_backend())
             expiry = getattr(cert, "not_valid_after_utc", None)
             if expiry is None:
                 expiry = cert.not_valid_after.replace(tzinfo=UTC)
             remaining = expiry - datetime.now(UTC)
-            if remaining > timedelta(days=7):
+            if remaining <= timedelta(days=7):
+                logger.info("TLS cert expires in %d days, renewing.", remaining.days)
+            elif cert.issuer == cert.subject:
+                logger.info("Existing TLS cert is self-signed, trying Tailscale for a trusted one.")
+                self_signed_pair = (cert_pem, key_path.read_bytes())
+            else:
                 logger.info("TLS cert valid for %d more days, reusing.", remaining.days)
                 return "existing"
-            logger.info("TLS cert expires in %d days, renewing.", remaining.days)
         except Exception:
             logger.debug("Could not check existing cert, will reprovision.")
 
@@ -955,7 +966,7 @@ def provision_tls_cert(cert_path: Path, key_path: Path) -> str:
                 logger.warning(
                     "tailscale cert failed (exit %d) for %s:\n  %s\n"
                     "  Hint: the process may need elevated permissions — "
-                    "try running as root or add your user to the 'tailscale' group.",
+                    "run 'sudo tailscale set --operator=$USER' once, or run as root.",
                     ts_cert.returncode,
                     fqdn,
                     combined or "(no output)",
@@ -972,7 +983,12 @@ def provision_tls_cert(cert_path: Path, key_path: Path) -> str:
     for p in (cert_path, key_path):
         if p.exists():
             p.unlink()
-    create_self_signed_cert(cert_path, key_path)
+    if self_signed_pair is not None:
+        cert_path.write_bytes(self_signed_pair[0])
+        key_path.write_bytes(self_signed_pair[1])
+        key_path.chmod(0o600)
+    else:
+        create_self_signed_cert(cert_path, key_path)
     logger.warning(
         "Using self-signed TLS cert (browsers will show a warning). "
         "To use trusted certs, enable HTTPS certificates in the Tailscale "
