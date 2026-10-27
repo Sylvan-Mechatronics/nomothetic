@@ -37,17 +37,35 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from threading import Lock
+from threading import Lock, Timer
 from typing import Any, Protocol
-
-try:
-    import vosk
-except ImportError:  # pragma: no cover - exercised by patching vosk to None
-    vosk = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
+_NOT_LOADED: Any = object()
+
+#: The vosk module once loaded, ``None`` when not installed, or ``_NOT_LOADED``
+#: before first use — imported lazily so a robot that never uses voice does
+#: not carry it. Tests patch it to a fake or ``None``.
+vosk: Any = _NOT_LOADED
+
+
+def _vosk_module() -> Any:
+    """Return the vosk module, importing it on first use (``None`` if missing)."""
+    global vosk
+    if vosk is _NOT_LOADED:
+        try:
+            import vosk as module
+
+            vosk = module
+        except ImportError:  # pragma: no cover - exercised by patching vosk to None
+            vosk = None
+    return vosk
+
+
 DEFAULT_MODEL_PATH = "/var/lib/nomon/stt/vosk-model-small-en-us-0.15"
+
+_DEFAULT_IDLE_UNLOAD_S = 300.0
 
 _SAMPLE_RATE_HZ = 16000
 _PCM_CHUNK_BYTES = 32000
@@ -180,6 +198,15 @@ def _to_pcm(audio: bytes) -> bytes:
     return proc.stdout
 
 
+def _idle_unload_from_env() -> float:
+    """Idle-unload delay from ``NOMON_STT_IDLE_UNLOAD_S`` (seconds, 0 = never)."""
+    raw = os.environ.get("NOMON_STT_IDLE_UNLOAD_S", "")
+    try:
+        return max(0.0, float(raw)) if raw.strip() else _DEFAULT_IDLE_UNLOAD_S
+    except ValueError:
+        return _DEFAULT_IDLE_UNLOAD_S
+
+
 # ============================================================================
 # Vosk engine
 # ============================================================================
@@ -194,14 +221,52 @@ class VoskSttEngine:
         Directory containing an unpacked Vosk model.  Defaults to the
         ``NOMON_STT_MODEL_PATH`` environment variable, then
         :data:`DEFAULT_MODEL_PATH`.
+    idle_unload_s : float, optional
+        Seconds after the last :meth:`transcribe` before a model loaded only
+        for transcription is released (0 = keep it loaded).  Defaults to
+        ``NOMON_STT_IDLE_UNLOAD_S``, then 300.  Never applies while a
+        streaming recognizer from :meth:`create_recognizer` may be alive —
+        the wake listener owns the model's lifetime then.
     """
 
     name = "vosk"
 
-    def __init__(self, model_path: str | None = None) -> None:
+    def __init__(self, model_path: str | None = None, idle_unload_s: float | None = None) -> None:
         self._model_path = model_path or os.environ.get("NOMON_STT_MODEL_PATH", DEFAULT_MODEL_PATH)
         self._model: Any | None = None
         self._lock = Lock()
+        self._idle_unload_s = (
+            idle_unload_s if idle_unload_s is not None else _idle_unload_from_env()
+        )
+        # True once a streaming recognizer has been handed out: those wrap a
+        # raw model handle, so auto-unloading under them would be a
+        # use-after-free. Cleared by unload(), which the wake listener calls
+        # only after its recognizers are gone.
+        self._shared = False
+        self._idle_timer: Timer | None = None
+        self._idle_generation = 0
+
+    def _schedule_idle_unload(self) -> None:
+        """(Re)arm the idle-unload timer; callers must hold ``self._lock``."""
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+        if self._shared or self._idle_unload_s <= 0 or self._model is None:
+            return
+        self._idle_generation += 1
+        timer = Timer(self._idle_unload_s, self._idle_unload, args=(self._idle_generation,))
+        timer.daemon = True
+        timer.start()
+        self._idle_timer = timer
+
+    def _idle_unload(self, generation: int) -> None:
+        """Timer callback: release the model unless it was used or shared since."""
+        with self._lock:
+            if generation != self._idle_generation or self._shared or self._model is None:
+                return
+            self._model = None
+            self._idle_timer = None
+            logger.info("vosk model unloaded after %.0fs idle", self._idle_unload_s)
 
     def _load_model(self) -> Any:
         """Load the Vosk model once; callers must hold ``self._lock``.
@@ -211,7 +276,8 @@ class VoskSttEngine:
         SttUnavailableError
             The ``vosk`` package or the model directory is missing.
         """
-        if vosk is None:
+        module = _vosk_module()
+        if module is None:
             raise SttUnavailableError(
                 "STT support is not installed on the device (nomothetic[stt] extra)"
             )
@@ -222,8 +288,8 @@ class VoskSttEngine:
                     "(run scripts/fetch_stt_model.sh on the device)"
                 )
             logger.info("loading vosk model from %s", self._model_path)
-            vosk.SetLogLevel(-1)
-            self._model = vosk.Model(self._model_path)
+            module.SetLogLevel(-1)
+            self._model = module.Model(self._model_path)
             logger.info("vosk model loaded")
         return self._model
 
@@ -247,6 +313,10 @@ class VoskSttEngine:
             True if a model was loaded and has now been released.
         """
         with self._lock:
+            self._shared = False
+            if self._idle_timer is not None:
+                self._idle_timer.cancel()
+                self._idle_timer = None
             if self._model is None:
                 return False
             self._model = None
@@ -270,7 +340,7 @@ class VoskSttEngine:
             Sample rate of the PCM that will be fed to the recognizer.
         grammar_json : str | None
             Optional JSON array of accepted phrases (e.g.
-            ``'["hey nomon", "[unk]"]'``) to constrain recognition to a
+            ``'["hey sylvia", "[unk]"]'``) to constrain recognition to a
             keyword grammar.  ``None`` uses the model's full vocabulary.
 
         Returns
@@ -286,9 +356,14 @@ class VoskSttEngine:
         """
         with self._lock:
             model = self._load_model()
+            # A long-lived recognizer now holds the raw model handle: hand the
+            # model's lifetime to the caller and stop any idle-unload timer.
+            self._shared = True
+            self._schedule_idle_unload()
+        module = _vosk_module()
         if grammar_json is not None:
-            return vosk.KaldiRecognizer(model, sample_rate_hz, grammar_json)
-        return vosk.KaldiRecognizer(model, sample_rate_hz)
+            return module.KaldiRecognizer(model, sample_rate_hz, grammar_json)
+        return module.KaldiRecognizer(model, sample_rate_hz)
 
     def transcribe(self, audio: bytes, content_type: str) -> SttResult:
         """Transcribe one audio clip with the local Vosk model.
@@ -320,10 +395,12 @@ class VoskSttEngine:
         with self._lock:
             model = self._load_model()
             pcm = _to_pcm(audio)
-            recognizer = vosk.KaldiRecognizer(model, _SAMPLE_RATE_HZ)
+            recognizer = _vosk_module().KaldiRecognizer(model, _SAMPLE_RATE_HZ)
             for start in range(0, len(pcm), _PCM_CHUNK_BYTES):
                 recognizer.AcceptWaveform(pcm[start : start + _PCM_CHUNK_BYTES])
             result = json.loads(recognizer.FinalResult())
+            del recognizer
+            self._schedule_idle_unload()
         text = (result.get("text") or "").strip()
         logger.info(
             "transcribed %d byte(s) of %s to %d character(s)", len(audio), content_type, len(text)

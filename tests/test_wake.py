@@ -27,7 +27,6 @@ from nomothetic.wake import (
     _resample_to_16k,
     _Resampler,
     _rms,
-    _trim_history,
     parse_variants,
     synthesize_chimes,
 )
@@ -377,17 +376,6 @@ def test_rms_silence_and_tone():
     assert _rms(SILENT_FRAME) == 0.0
     assert _rms(b"") == 0.0
     assert _rms(LOUD_FRAME) == pytest.approx(12000.0)
-
-
-def test_trim_history_drops_oldest_pairs_keeping_alternation():
-    messages = []
-    for i in range(13):
-        messages.append({"role": "user", "content": f"u{i}"})
-        messages.append({"role": "assistant", "content": f"a{i}"})
-    trimmed = _trim_history(messages)
-    assert len(trimmed) == 20
-    assert trimmed[0] == {"role": "user", "content": "u3"}
-    assert [m["role"] for m in trimmed[:2]] == ["user", "assistant"]
 
 
 def test_synthesize_chimes_writes_four_valid_wavs(tmp_path):

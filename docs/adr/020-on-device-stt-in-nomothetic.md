@@ -4,6 +4,15 @@
 **Date:** 2026-07-09
 **Deciders:** Perceptua
 
+> **Amendment 2026-10-27 — hardware bottleneck:** on the 512 MB Pi Zero 2W,
+> loading the ~120 MB Vosk model for one app voice command filled swap
+> (414/414 MB), even with idle unload. Transcription is therefore **switched
+> off by config on the Zero 2W** (`NOMON_STT_MODEL_PATH` pointed at a
+> directory that does not exist, so `/api/ai/transcribe` answers 503 without
+> loading anything). The design and code stand unchanged. On-device STT
+> resumes once the robot moves to a board with more RAM (≥1 GB), which is
+> planned before further voice development.
+
 ---
 
 ## Context

@@ -333,6 +333,13 @@ If your layout differs, use the equivalent repository paths.
 can take voice input. It needs ffmpeg and a local Vosk model; without them the
 endpoint returns 503 and everything else works normally.
 
+> **Off on a Pi Zero 2W.** One transcription loads the ~120 MB model, which
+> filled swap on the 512 MB board (2026-10-27). Switch it off with
+> `NOMON_STT_MODEL_PATH=/var/lib/nomon/stt/disabled` (any directory that does
+> not exist). Transcribe then answers 503 without loading anything, and the
+> deploy leaves the installed model in place. Use typed commands until the
+> robot runs on a board with ≥1 GB RAM.
+
 **`make deploy-local` handles both automatically** (Phase 29): it apt-installs
 ffmpeg/unzip alongside the other system packages, and installs the Vosk model
 `NOMON_STT_MODEL_PATH` points at (default small English) — removing any stale
@@ -357,7 +364,13 @@ curl -sk -X POST https://localhost:8443/api/ai/transcribe \
   -F "audio=@clip.wav"
 ```
 
-### 5.2 Optional: wake-word voice commands ("hey nomon")
+### 5.2 Optional: wake-word voice commands ("hey sylvia")
+
+> **Not on a Pi Zero 2W.** The listener keeps the Vosk model resident for as
+> long as it runs (idle unload is skipped while it holds a recognizer). On the
+> 512 MB Zero 2W the API swapped ~195 MB within two minutes of boot and the
+> board hung (2026-10-26). Leave `NOMON_WAKE_PHRASE` unset there and use the
+> app's tap-to-speak instead; enable hands-free on boards with ≥1 GB RAM.
 
 The robot listens on its own USB mic for a catch phrase, chimes, captures the
 spoken command, and runs it through the AI relay (ADR-021). Prerequisites: the
@@ -379,17 +392,21 @@ manual `start.sh` path). Values with spaces must be double-quoted — the file
 is bash-sourced during deploys as well as read by systemd:
 
 ```bash
-NOMON_WAKE_PHRASE="hey nomon"
-NOMON_WAKE_PHRASE_VARIANTS="hey no man,hey no mon"
+NOMON_WAKE_PHRASE="hey sylvia"
+NOMON_WAKE_PHRASE_VARIANTS="hey silvia,a sylvia"
 ```
 
 then `sudo systemctl restart nomothetic-api`. The journal shows
-`wake-word listener started (phrase="hey nomon", ...)` and the chime files
+`wake-word listener started (phrase="hey sylvia", ...)` and the chime files
 appear under `media/audio/chimes/` (replace them to customise the sounds).
 
 **Tuning the phrase (important):** Vosk silently drops grammar words that are
-missing from its vocabulary — "nomon" is one — so the literal phrase may never
-match and the *variants* are what actually fire. Tune live without restarts:
+missing from its vocabulary (it logs `Ignoring word missing in vocabulary`).
+Matching is on the whole phrase, so a dropped word means that entry can never
+fire — it fails closed, never on a partial match like "hey" alone. Check the
+journal for that warning after a phrase change; an out-of-vocabulary name
+(e.g. "nomon") needs in-vocabulary *variants* to work at all. Tune live
+without restarts:
 
 ```bash
 # Status (state, phrase, variants):
@@ -398,7 +415,7 @@ curl -sk https://localhost:8443/api/voice/wake -H "Authorization: Bearer <device
 # Try a different variant set (in-memory; persist winners in the env file):
 curl -sk -X PUT https://localhost:8443/api/voice/wake \
   -H "Authorization: Bearer <device-jwt>" -H "Content-Type: application/json" \
-  -d '{"phrase": "hey nomon", "variants": ["hey no man", "hey no mon"], "enabled": true}'
+  -d '{"phrase": "hey sylvia", "variants": ["hey silvia", "a sylvia"], "enabled": true}'
 ```
 
 Say the phrase, watch `journalctl -u nomothetic-api -f` for

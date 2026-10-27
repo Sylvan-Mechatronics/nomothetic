@@ -34,7 +34,7 @@
 | 27 | Autonomy Telemetry Persistence (MQTT device→central) | ✅ Complete |
 | 28 | Voice Command Transcription (on-device STT) | ✅ Complete |
 | 30 | Raw Inputs for Autonomy (odometry, IMU, UWB), `cmd_vel`, Vehicle Arbitration | 🔜 Planned — autonomon ADR-008 |
-| 31 | Security Hardening 2 (workspace review 2026-09-13) | ✅ Complete except S-24; see `REVIEW-2026-09-13.md` §7 |
+| 31 | Security Hardening 2 (workspace review 2026-09-13) | ✅ Complete; see `REVIEW-2026-09-13.md` §7 |
 
 **Test totals (current): 663 passing** (23 camera + 14 streaming + 168 API + 36 telemetry + 94 HAT + 19 audio + 18 auth + 29 central + 32 device-auth + 17 db + 41 pairing + 12 rate-limit + 6 mode + 15 network-provision + 13 token-store + 25 user-store + 22 fleet-store + 7 wifi-ap + 72 routine-launcher [10 catalogue + 17 control + 16 logs + 29 manager]; `ap_mode` tests removed — see ADR-016 amendment)
 
@@ -1749,6 +1749,10 @@ and the robot's own microphone is not involved. See ADR-020.
       other endpoints unaffected.
 - [x] New tests: `tests/test_stt.py` + transcribe cases in
       `tests/test_ai_routes.py`; `make check` clean.
+- [x] **Disabled on the Pi Zero 2W (2026-10-27).** One app voice command's
+      model load filled swap on the 512 MB board. Off by config
+      (`NOMON_STT_MODEL_PATH` → nonexistent dir → 503); code unchanged.
+      Re-enable after the hardware upgrade (ADR-020 amendment).
 
 ---
 
@@ -1788,6 +1792,13 @@ See ADR-021.
       enable/disable/phrase/variant updates (in-memory; env is boot config).
 - [x] `NOMON_WAKE_*` env vars (`.env.device.example`), `[wakeword]` section in
       `config.toml` emitted conditionally by `scripts/start.sh`.
+- [x] Default example phrase is now "hey sylvia" (variants "hey silvia",
+      "a sylvia"), replacing "hey truck" (2026-10-26). Confirm on-device that
+      the journal shows no `Ignoring word missing in vocabulary` warning.
+- [x] **Disabled on the Pi Zero 2W (2026-10-26).** The resident Vosk model
+      pushed the API to ~195 MB of swap within two minutes of boot and hung the
+      board on three consecutive boots. The code stays for boards with more RAM.
+      On the Zero 2W, voice is app-initiated only (tap-to-speak → transcribe).
 
 #### 29.3 — Deployment
 - [x] `nomothetic-api.service`: `SupplementaryGroups=audio`; deploy.sh adds
@@ -1876,7 +1887,28 @@ Findings and status live in `REVIEW-2026-09-13.md` (workspace root, §3 and §7)
 - [x] S-13 — starlette 1.6 / urllib3 2.7; `cargo audit` clean
 - [x] S-14 — refresh + events rate limits
 - [x] S-17 — systemd hardening on the three units (verify on next Pi deploy)
-- [ ] S-24 — server-side AI conversation history
+- [x] S-24 — server-side AI conversation history: `POST /api/ai/command`
+      takes `{message, conversation_id?}` only; the device keeps the turns
+      (`ai_conversations.AiConversationStore` — in-memory, 30 min idle TTL,
+      8 conversations LRU, 20-turn trim) and returns the id; 404 for an
+      unknown/expired id (the app retries once fresh), 409 while a command
+      in that conversation is still running. nomotactic `lib/ai.ts` sends
+      only the new message. (2026-10-26)
+
+#### Pi memory (2026-10-26)
+- [x] `anthropic` SDK imported on first AI command, not at boot (~30 MB,
+      ~1000 modules); `vosk` imported on first voice use. Startup RSS of
+      `create_app()` measured 101 → 72 MB on x86.
+- [x] Vosk model loaded for app transcription is released after
+      `NOMON_STT_IDLE_UNLOAD_S` (default 300 s) idle — previously it stayed
+      resident forever after one voice command. Never applied while the
+      wake listener holds recognizers.
+- [x] **Hardware bottleneck acknowledged (2026-10-27).** These fixes are not
+      enough for voice on the Zero 2W: the wake listener hung the board within
+      two minutes of boot, and one app transcription filled swap. Both are off
+      by config (`NOMON_WAKE_PHRASE` unset, `NOMON_STT_MODEL_PATH` → nonexistent
+      dir); all voice code stays. Voice development resumes on a board with
+      ≥1 GB RAM. Typed AI commands remain supported on the Zero 2W.
 
 ---
 

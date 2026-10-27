@@ -4,6 +4,18 @@
 **Date:** 2026-07-10
 **Deciders:** Perceptua
 
+> **Amendment 2026-10-26:** the documented catch phrase is now "hey sylvia"
+> (variants "hey silvia", "a sylvia"). "hey nomon" below is the original
+> example; "nomon" is out of the Vosk vocabulary, which is why it needed
+> variants. The phrase remains pure configuration (`NOMON_WAKE_PHRASE`).
+>
+> **Amendment 2026-10-26 (later):** measured on-device, the "eager model RAM"
+> trade-off below is not affordable on the Pi Zero 2W. The listener's resident
+> model drove the API to ~195 MB of swap and hung the board within two minutes
+> of boot. The listener stays in the codebase but is **off on the Zero 2W**;
+> hands-free voice waits for production hardware with more RAM. App-initiated
+> voice (ADR-020) remains the supported path.
+
 ---
 
 ## Context
