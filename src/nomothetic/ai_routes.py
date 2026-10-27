@@ -17,14 +17,13 @@ provider requests and transcription is CPU-heavy on the Pi.
 """
 
 import asyncio
-import itertools
 import logging
 import os
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from nomothetic.ai_command import (
     AiCommandService,
@@ -34,6 +33,11 @@ from nomothetic.ai_command import (
     AiProviderError,
     AiUnavailableError,
     validate_api_key_format,
+)
+from nomothetic.ai_conversations import (
+    AiConversationStore,
+    ConversationBusyError,
+    ConversationNotFoundError,
 )
 from nomothetic.rate_limit import ai_rate_limit, stt_rate_limit
 from nomothetic.stt import SttEngine, SttTranscriptionError, SttUnavailableError
@@ -61,29 +65,23 @@ def _now() -> str:
 # ---------------------------------------------------------------------------
 
 
-class AiChatMessage(BaseModel):
-    """One prior conversation turn (plain text only; tool blocks stay server-side)."""
-
-    role: Literal["user", "assistant"]
-    content: str = Field(..., min_length=1, max_length=8000)
-
-
 class AiCommandRequest(BaseModel):
-    """A chat command: prior turns plus the new user message, oldest first."""
+    """A chat command: the new user message, continuing a conversation if given.
 
-    messages: list[AiChatMessage] = Field(..., min_length=1, max_length=40)
+    Prior turns are never accepted from the client (review S-24) — the device
+    holds each conversation's history and issues its ``conversation_id``.
+    """
 
-    @model_validator(mode="after")
-    def _check_roles(self) -> "AiCommandRequest":
-        """Enforce the Messages API turn shape: starts and ends with the user, alternating."""
-        if self.messages[0].role != "user":
-            raise ValueError("first message must have role 'user'")
-        if self.messages[-1].role != "user":
-            raise ValueError("last message must have role 'user'")
-        for prev, nxt in itertools.pairwise(self.messages):
-            if prev.role == nxt.role:
-                raise ValueError("message roles must alternate between 'user' and 'assistant'")
-        return self
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(..., min_length=1, max_length=8000)
+    conversation_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="Id from an earlier response; omit to start a new conversation.",
+    )
 
 
 class AiActionRecord(BaseModel):
@@ -103,6 +101,7 @@ class AiCommandResponse(BaseModel):
     actions: list[AiActionRecord]
     model: str
     stop_reason: str
+    conversation_id: str
     timestamp: str
 
 
@@ -164,6 +163,15 @@ def create_ai_router() -> APIRouter:
                 detail="AI command service not configured",
             )
         return service
+
+    def _conversations(request: Request) -> AiConversationStore:
+        store: AiConversationStore | None = getattr(request.app.state, "ai_conversations", None)
+        if store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="AI conversation store not configured",
+            )
+        return store
 
     def _stt_engine(request: Request) -> SttEngine:
         engine: SttEngine | None = getattr(request.app.state, "stt_engine", None)
@@ -237,15 +245,21 @@ def create_ai_router() -> APIRouter:
     async def run_ai_command(body: AiCommandRequest, request: Request):
         """Run one chat command through the Claude robot-tool loop.
 
+        The conversation history comes from the device's own store, never the
+        request; the response carries the ``conversation_id`` to continue it.
+
         Raises
         ------
         HTTPException
+            404 if ``conversation_id`` is unknown or expired (start a new one),
+            409 if a command is already running in that conversation,
             503 if no API key is configured or AI support is not installed,
             502 if the AI provider rejects the key or the request fails,
             429 when rate limited.
         """
         service = _service(request)
         store = _key_store(request)
+        conversations = _conversations(request)
         resolved = await asyncio.to_thread(store.resolve)
         if resolved is None:
             raise HTTPException(
@@ -254,24 +268,39 @@ def create_ai_router() -> APIRouter:
             )
         api_key, _source = resolved
         try:
-            result = await service.run_command(
-                [message.model_dump() for message in body.messages],
-                api_key=api_key,
-            )
+            conversation_id, history = conversations.begin(body.conversation_id, body.message)
+        except ConversationNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Conversation not found or expired; start a new one.",
+            ) from exc
+        except ConversationBusyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A command is already running in this conversation.",
+            ) from exc
+        try:
+            result = await service.run_command(history, api_key=api_key)
         except AiUnavailableError as exc:
+            conversations.abort(conversation_id)
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
             ) from exc
-        except AiProviderAuthError as exc:
+        except (AiProviderAuthError, AiProviderError) as exc:
+            conversations.abort(conversation_id)
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-        except AiProviderError as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        except BaseException:
+            # Cancellation (client disconnect) or an unexpected failure must not
+            # leave the conversation stuck busy.
+            conversations.abort(conversation_id)
+            raise
+        conversations.commit(conversation_id, body.message, result["reply"])
         logger.info(
             "AI command completed: %d action(s), stop_reason=%s",
             len(result["actions"]),
             result["stop_reason"],
         )
-        return AiCommandResponse(timestamp=_now(), **result)
+        return AiCommandResponse(timestamp=_now(), conversation_id=conversation_id, **result)
 
     @router.post(
         "/transcribe",

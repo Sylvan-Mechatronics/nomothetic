@@ -1,7 +1,7 @@
 """On-robot wake-word voice commands (Phase 29, ADR-021).
 
 The robot listens on its own USB microphone for a configurable catch phrase
-(``NOMON_WAKE_PHRASE``, e.g. ``"hey nomon"``), plays a chime to signal it is
+(``NOMON_WAKE_PHRASE``, e.g. ``"hey sylvia"``), plays a chime to signal it is
 listening, captures the spoken command, transcribes it with the *shared* Vosk
 model (:meth:`nomothetic.stt.VoskSttEngine.create_recognizer`), and dispatches
 the text to the same :class:`~nomothetic.ai_command.AiCommandService` the app's
@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from nomothetic.ai_command import MOTION_TOOLS, AiProviderError, AiUnavailableError
+from nomothetic.ai_conversations import trim_history
 from nomothetic.audio import (
     DEFAULT_DEVICE_NAME_MATCH,
     env_device_index,
@@ -96,10 +97,6 @@ _RESAMPLE_TAPS = 25
 
 #: Duration of one capture frame.
 _FRAME_MS = 100
-
-#: Conversation history cap (matches the app's client-side trim; the REST
-#: route allows 40, so 20 leaves the same headroom the app keeps).
-_MAX_HISTORY_MESSAGES = 20
 
 #: Frames of below-threshold audio before the RMS gate stops feeding the
 #: wake recognizer (10 × 100 ms = 1 s of hangover).
@@ -438,19 +435,6 @@ def _rms(pcm: bytes) -> float:
     if not samples:
         return 0.0
     return math.sqrt(sum(s * s for s in samples) / len(samples))
-
-
-def _trim_history(messages: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Cap conversation history, dropping the oldest turns in pairs.
-
-    Dropping user/assistant *pairs* preserves the user-first alternation the
-    Messages API requires (validation lives only in the REST route, so the
-    listener must keep its history well-formed itself).
-    """
-    trimmed = list(messages)
-    while len(trimmed) > _MAX_HISTORY_MESSAGES:
-        del trimmed[:2]
-    return trimmed
 
 
 def synthesize_chimes(chime_dir: Path) -> dict[str, Path]:
@@ -1162,7 +1146,7 @@ class WakeWordListener:
             # operator hears nothing until the success/error chime.
             self._play_chime("processing")
             history.append({"role": "user", "content": text})
-            history = _trim_history(history)
+            history = trim_history(history)
             self._state = "dispatching"
             # Speak the transcript back concurrently with the network-bound AI
             # dispatch, so the echo overlaps the wait instead of adding to it.
@@ -1177,7 +1161,7 @@ class WakeWordListener:
                 # No assistant text to carry forward (or follow-ups disabled).
                 return
             history.append({"role": "assistant", "content": reply})
-            history = _trim_history(history)
+            history = trim_history(history)
             timeout_s = self._followup_window_s
 
     @property

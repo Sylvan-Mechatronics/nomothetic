@@ -1529,6 +1529,7 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
     # lives here (ADR-004). The Anthropic key is user-supplied via /api/ai/key
     # (0600 file on the device) with ANTHROPIC_API_KEY as operator fallback.
     from nomothetic.ai_command import AiCommandService, AiKeyStore
+    from nomothetic.ai_conversations import AiConversationStore
     from nomothetic.ai_routes import create_ai_router
     from nomothetic.rate_limit import RateLimiter as _AiRateLimiter
     from nomothetic.routine_catalog import autonomon_catalog
@@ -1541,6 +1542,9 @@ def _register_device_routes(app: FastAPI, mode: "Mode") -> None:
         get_routine_manager=lambda: getattr(app.state, "routine_manager", None),
         get_catalog=autonomon_catalog,
     )
+    # Chat history lives on the device, keyed by ids it issues — the app sends
+    # only the new message, so it cannot forge assistant turns (review S-24).
+    app.state.ai_conversations = AiConversationStore()
     app.state.ai_limiter = _AiRateLimiter(max_requests=10, window_seconds=60)
     # Voice commands: the app uploads a recorded clip, the device transcribes
     # it locally (vosk small model, lazy-loaded on first use), and the text
