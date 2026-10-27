@@ -236,3 +236,102 @@ def test_create_recognizer_missing_model_dir_raises_unavailable(tmp_path):
     with patch.object(stt, "vosk", _fake_vosk()):
         with pytest.raises(SttUnavailableError, match="no-such-model"):
             engine.create_recognizer()
+
+
+# ============================================================================
+# Memory: lazy import + idle unload (Pi Zero 2W)
+# ============================================================================
+
+
+class FakeTimer:
+    """Captures threading.Timer arguments; fires only when told to."""
+
+    instances: list["FakeTimer"] = []
+
+    def __init__(self, interval, function, args=()):
+        self.interval = interval
+        self.function = function
+        self.args = args
+        self.cancelled = False
+        self.daemon = False
+        FakeTimer.instances.append(self)
+
+    def start(self):
+        pass
+
+    def cancel(self):
+        self.cancelled = True
+
+    def fire(self):
+        self.function(*self.args)
+
+
+@pytest.fixture
+def fake_timer():
+    FakeTimer.instances = []
+    with patch.object(stt, "Timer", FakeTimer):
+        yield FakeTimer
+
+
+def test_vosk_is_not_imported_until_first_use(monkeypatch):
+    monkeypatch.setattr(stt, "vosk", stt._NOT_LOADED)
+    VoskSttEngine(model_path="/nonexistent")
+    assert stt.vosk is stt._NOT_LOADED
+
+
+def test_transcribe_arms_idle_unload_and_timer_releases_model(model_dir, fake_timer):
+    engine = VoskSttEngine(model_path=model_dir, idle_unload_s=120)
+    fake = _fake_vosk()
+    with patch.object(stt, "vosk", fake):
+        with patch.object(stt, "_to_pcm", return_value=b"\x00\x01"):
+            engine.transcribe(b"audio", "audio/mp4")
+            assert len(fake_timer.instances) == 1
+            assert fake_timer.instances[0].interval == 120
+            fake_timer.instances[0].fire()
+            assert engine.unload() is False  # already released by the timer
+            engine.transcribe(b"audio", "audio/mp4")
+    assert fake.Model.call_count == 2
+
+
+def test_newer_transcribe_supersedes_older_idle_timer(model_dir, fake_timer):
+    engine = VoskSttEngine(model_path=model_dir, idle_unload_s=120)
+    with patch.object(stt, "vosk", _fake_vosk()):
+        with patch.object(stt, "_to_pcm", return_value=b"\x00\x01"):
+            engine.transcribe(b"audio", "audio/mp4")
+            engine.transcribe(b"audio", "audio/mp4")
+    first, second = fake_timer.instances
+    assert first.cancelled
+    first.fire()  # a stale timer that raced its cancel must not unload
+    assert engine.unload() is True
+
+
+def test_idle_unload_never_runs_once_a_recognizer_is_shared(model_dir, fake_timer):
+    engine = VoskSttEngine(model_path=model_dir, idle_unload_s=120)
+    with patch.object(stt, "vosk", _fake_vosk()):
+        with patch.object(stt, "_to_pcm", return_value=b"\x00\x01"):
+            engine.transcribe(b"audio", "audio/mp4")
+            engine.create_recognizer(16000, '["hey sylvia", "[unk]"]')
+            assert fake_timer.instances[0].cancelled
+            fake_timer.instances[0].fire()
+            engine.transcribe(b"audio", "audio/mp4")
+    assert len(fake_timer.instances) == 1  # no new timer while shared
+    assert engine.unload() is True  # the model was still loaded
+
+
+def test_explicit_unload_returns_engine_to_idle_unload_mode(model_dir, fake_timer):
+    engine = VoskSttEngine(model_path=model_dir, idle_unload_s=120)
+    with patch.object(stt, "vosk", _fake_vosk()):
+        with patch.object(stt, "_to_pcm", return_value=b"\x00\x01"):
+            engine.create_recognizer()
+            assert engine.unload() is True
+            engine.transcribe(b"audio", "audio/mp4")
+    assert len(fake_timer.instances) == 1
+
+
+def test_idle_unload_disabled_with_zero(model_dir, fake_timer, monkeypatch):
+    monkeypatch.setenv("NOMON_STT_IDLE_UNLOAD_S", "0")
+    engine = VoskSttEngine(model_path=model_dir)
+    with patch.object(stt, "vosk", _fake_vosk()):
+        with patch.object(stt, "_to_pcm", return_value=b"\x00\x01"):
+            engine.transcribe(b"audio", "audio/mp4")
+    assert fake_timer.instances == []

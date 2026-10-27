@@ -24,6 +24,8 @@ Security posture
 The ``anthropic`` SDK is an optional dependency (``nomothetic[ai]``).  When it
 is missing this module still imports and key management still works, but
 running a command raises :class:`AiUnavailableError` (mapped to HTTP 503).
+The SDK is imported on first use rather than at module load: it costs ~30 MB
+and ~1000 modules, which a Pi Zero 2W should not carry until someone chats.
 """
 
 from __future__ import annotations
@@ -41,12 +43,27 @@ from typing import Any
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-try:
-    import anthropic
-except ImportError:  # pragma: no cover - exercised by patching anthropic to None
-    anthropic = None  # type: ignore[assignment]
-
 logger = logging.getLogger(__name__)
+
+_NOT_LOADED: Any = object()
+
+#: The anthropic SDK module once loaded, ``None`` when not installed, or
+#: ``_NOT_LOADED`` before first use. Tests patch it to ``None``.
+anthropic: Any = _NOT_LOADED
+
+
+def _anthropic_sdk() -> Any:
+    """Return the anthropic SDK module, importing it on first use (``None`` if missing)."""
+    global anthropic
+    if anthropic is _NOT_LOADED:
+        try:
+            import anthropic as sdk
+
+            anthropic = sdk
+        except ImportError:  # pragma: no cover - exercised by patching anthropic to None
+            anthropic = None
+    return anthropic
+
 
 _DEFAULT_KEY_PATH = "/var/lib/nomon/ai_api_key"
 _MIN_STORED_KEY_LENGTH = 20
@@ -391,18 +408,20 @@ def _int_env(name: str, default: int, lo: int, hi: int) -> int:
 
 def _default_client_factory(api_key: str) -> Any:
     """Build an ``AsyncAnthropic`` client for one command run."""
-    if anthropic is None:  # pragma: no cover - callers check availability first
+    sdk = _anthropic_sdk()
+    if sdk is None:  # pragma: no cover - callers check availability first
         raise AiUnavailableError("anthropic SDK is not installed")
-    return anthropic.AsyncAnthropic(api_key=api_key, timeout=_REQUEST_TIMEOUT_S, max_retries=1)
+    return sdk.AsyncAnthropic(api_key=api_key, timeout=_REQUEST_TIMEOUT_S, max_retries=1)
 
 
 def _map_provider_error(exc: Exception) -> AiProviderError | None:
     """Map an anthropic SDK exception to our error types (``None`` = not ours)."""
-    if anthropic is None:
+    sdk = _anthropic_sdk()
+    if sdk is None:
         return None
-    if isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
+    if isinstance(exc, (sdk.AuthenticationError, sdk.PermissionDeniedError)):
         return AiProviderAuthError("the AI provider rejected the configured API key")
-    if isinstance(exc, anthropic.APIError):
+    if isinstance(exc, sdk.APIError):
         return AiProviderError(f"AI provider request failed: {exc}")
     return None
 
@@ -516,7 +535,7 @@ class AiCommandService:
         """
         factory = self._client_factory
         if factory is None:
-            if anthropic is None:
+            if _anthropic_sdk() is None:
                 raise AiUnavailableError(
                     "AI support is not installed on this device (install nomothetic[ai])"
                 )
