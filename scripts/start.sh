@@ -187,7 +187,10 @@ else:
     print("NOM_API_USE_SSL="          + str(bool(a.get("use_ssl",          True))).lower())
     print("NOM_API_CERT_DIR="         + repr(str(a.get("cert_dir",         ".certs"))))
     print("NOM_HAT_SOCKET="           + repr(str(h.get("socket_path",      ""))))
-    print("NOMON_MEDIA_DIR="          + repr(str(md.get("dir",             "~/perceptua-nomon/media"))))
+    # Only emitted when config.toml sets [media].dir; otherwise the media dir
+    # comes from NOMON_MEDIA_DIR or $NOMON_HOME/media (resolved below).
+    if str(md.get("dir", "")).strip():
+        print("NOMON_MEDIA_DIR="      + repr(str(md["dir"])))
     # Only emitted when config.toml sets an explicit index — the default is
     # name-based auto-detection, and a blind numeric index can segfault
     # libportaudio (PortAudio indexes are not ALSA card numbers).
@@ -220,10 +223,13 @@ fi
 mkdir -p "${NOM_LOG_DIR}"
 LOG_FILE="${NOM_LOG_DIR}/${SERVER_TYPE}.log"
 
-# ─── Expand ~ in NOMON_MEDIA_DIR ─────────────────────────────────────────────
-if [[ -n "${NOMON_MEDIA_DIR:-}" ]]; then
-  NOMON_MEDIA_DIR="${NOMON_MEDIA_DIR/#\~/$HOME}"
-fi
+# ─── Resolve NOMON_HOME and NOMON_MEDIA_DIR (with ~ expansion) ───────────────
+# Precedence for media: config.toml [media].dir > NOMON_MEDIA_DIR > $NOMON_HOME/media.
+NOMON_HOME="${NOMON_HOME:-~/perceptua-nomon}"
+NOMON_MEDIA_DIR="${NOMON_MEDIA_DIR:-${NOMON_HOME}/media}"
+NOMON_HOME="${NOMON_HOME/#\~/$HOME}"
+NOMON_MEDIA_DIR="${NOMON_MEDIA_DIR/#\~/$HOME}"
+export NOMON_HOME
 
 # ─── Build server-specific launch snippet and display info ───────────────────
 if [[ "${SERVER_TYPE}" == "stream" ]]; then

@@ -53,7 +53,9 @@ socket_path = "/run/nomopractic/nomopractic.sock"
 #   photos/ — still image captures
 #   videos/ — video recordings
 #   audio/  — WAV recordings
-dir = "~/perceptua-nomon/media"
+# Unset by default: falls back to NOMON_MEDIA_DIR, else $NOMON_HOME/media
+# (NOMON_HOME defaults to ~/perceptua-nomon).  Set only to override both.
+# dir = "/mnt/usb/nomon-media"
 
 # ─── Audio input ─────────────────────────────────────────────────────────────
 [audio]

@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from nomothetic.paths import media_dir
+
 try:
     import pyaudio  # type: ignore[import-untyped]
 
@@ -43,10 +45,8 @@ except ImportError:  # pragma: no cover — pyaudio not installed in dev env
 # ---------------------------------------------------------------------------
 
 #: Default directory where recorded audio files are saved.
-#: Resolved from ``NOMON_MEDIA_DIR/audio`` (with tilde expansion).
-DEFAULT_AUDIO_DIR: str = str(
-    Path(os.environ.get("NOMON_MEDIA_DIR", "~/perceptua-nomon/media")).expanduser() / "audio"
-)
+#: Resolved as ``<media dir>/audio`` — see :func:`nomothetic.paths.media_dir`.
+DEFAULT_AUDIO_DIR: str = str(media_dir() / "audio")
 
 #: Default name fragment used to auto-detect audio devices (the robot's mic
 #: and speaker share a USB PCM2902 codec).  Case-insensitive.
@@ -225,7 +225,7 @@ class AudioRecorder:
     ----------
     audio_dir : str | Path | None
         Directory where recorded WAV files are saved.  Defaults to
-        ``NOMON_MEDIA_DIR`` env var / ``~/perceptua-nomon/media/audio``.
+        ``NOMON_MEDIA_DIR/audio``, else ``$NOMON_HOME/media/audio``.
     input_device_index : int | None
         Explicit **PortAudio** device index for the microphone; defaults from
         ``NOMON_AUDIO_INPUT_INDEX``.  When None the capture device is

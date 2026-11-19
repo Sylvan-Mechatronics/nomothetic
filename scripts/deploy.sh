@@ -37,8 +37,10 @@
 #                     use the ssh-agent / default identity.)
 #   NOMON_SUDO_PASS   Optional sudo password for non-interactive remote sudo
 #                     operations. Leave unset to use interactive sudo prompts.
+#   NOMON_HOME        nomon root folder on the Pi (default ~/perceptua-nomon).
+#                     Also copied to the device env, where it sets the media dir.
 #   NOMON_REMOTE_DIR  Absolute path to the repo directory on the Pi. Optional;
-#                     defaults to ${HOME}/perceptua-nomon/nomothetic.
+#                     defaults to ${NOMON_HOME}/nomothetic.
 #
 # The script (release mode) connects to the Pi and performs the following steps there:
 #   1. Stops all nomothetic servers, including systemd-managed services if present.
@@ -111,7 +113,7 @@ if [[ -f "${ENV_FILE}" ]]; then
         val="${val#\"}" ; val="${val%\"}"
         val="${val#\'}" ; val="${val%\'}"
         case "${key}" in
-            NOMON_PI_HOST|NOMON_SSH_KEY|NOMON_REMOTE_DIR|NOMON_SUDO_PASS) export "${key}=${val}" ;;
+            NOMON_PI_HOST|NOMON_SSH_KEY|NOMON_HOME|NOMON_REMOTE_DIR|NOMON_SUDO_PASS) export "${key}=${val}" ;;
         esac
     done < "${ENV_FILE}"
 fi
@@ -166,6 +168,13 @@ if [[ "${DEPLOY_LOCAL}" == true ]]; then
     echo "==> Local deploy: nomothetic ${VERSION}"
 fi
 
+# ── Deploy target ──────────────────────────────────────────────────────────────
+# NOMON_REMOTE_DIR, else <NOMON_HOME>/nomothetic. Kept as a literal "~/..." here
+# so it resolves against the Pi user's home, not the dev machine's.
+
+NOMON_HOME="${NOMON_HOME:-~/perceptua-nomon}"
+DEPLOY_REMOTE_DIR="${NOMON_REMOTE_DIR:-${NOMON_HOME%/}/nomothetic}"
+
 # ── SSH helpers ────────────────────────────────────────────────────────────────
 # If PI_HOST is set we run everything remotely; otherwise we run locally.
 
@@ -179,14 +188,14 @@ if [[ -n "${PI_HOST}" ]]; then
     # positionals into one string and silently drops empty ones, shifting args.
     _VERSION_QUOTED="$(printf '%q' "${VERSION}")"
     _DEPLOY_LOCAL_QUOTED="$(printf '%q' "${DEPLOY_LOCAL}")"
-    _REMOTE_DIR_QUOTED="$(printf '%q' "${NOMON_REMOTE_DIR:-}")"
+    _REMOTE_DIR_QUOTED="$(printf '%q' "${DEPLOY_REMOTE_DIR}")"
     RUN_CMD=(ssh "${SSH_OPTS[@]}" "${PI_HOST}" "NOMON_SKIP_TESTS=${SKIP_TESTS} NOMON_DEPLOY_VERSION=${_VERSION_QUOTED} NOMON_DEPLOY_LOCAL=${_DEPLOY_LOCAL_QUOTED} NOMON_DEPLOY_REMOTE_DIR=${_REMOTE_DIR_QUOTED} bash -ls")
 else
     echo "==> Deploying nomothetic${VERSION:+ ${VERSION}} locally"
     export NOMON_SKIP_TESTS="${SKIP_TESTS}"
     export NOMON_DEPLOY_VERSION="${VERSION}"
     export NOMON_DEPLOY_LOCAL="${DEPLOY_LOCAL}"
-    export NOMON_DEPLOY_REMOTE_DIR="${NOMON_REMOTE_DIR:-}"
+    export NOMON_DEPLOY_REMOTE_DIR="${DEPLOY_REMOTE_DIR}"
     RUN_CMD=(bash -ls)
 fi
 
@@ -271,11 +280,8 @@ EO_NOMOTHETIC_ENV
 # ── Local mode: sync source tree to Pi ────────────────────────────────────────
 
 if [[ "${DEPLOY_LOCAL}" == true && -n "${PI_HOST}" ]]; then
-    _remote_dir="${NOMON_REMOTE_DIR:-}"
-    _remote_dir_for_ssh="${_remote_dir:-~/perceptua-nomon/nomothetic}"
-    # We can't expand $HOME for the remote side here, so default to a literal path
-    # the remote script will also accept. Use a placeholder that ssh can resolve.
-    _rsync_dest="${PI_HOST}:${_remote_dir:-~/perceptua-nomon/nomothetic/}"
+    _remote_dir_for_ssh="${DEPLOY_REMOTE_DIR}"
+    _rsync_dest="${PI_HOST}:${DEPLOY_REMOTE_DIR%/}/"
     RSYNC_OPTS=(--archive --compress --delete
         --exclude='.git/'
         --exclude='__pycache__/'
@@ -333,7 +339,9 @@ fi
 
 readonly REQUESTED_VERSION="${NOMON_DEPLOY_VERSION:-}"
 readonly DEPLOY_LOCAL="${NOMON_DEPLOY_LOCAL:-false}"
-readonly REMOTE_DIR="${NOMON_DEPLOY_REMOTE_DIR:-${HOME}/perceptua-nomon/nomothetic}"
+_remote_dir="${NOMON_DEPLOY_REMOTE_DIR:-~/perceptua-nomon/nomothetic}"
+[[ "${_remote_dir}" == "~/"* ]] && _remote_dir="${HOME}/${_remote_dir#\~/}"
+readonly REMOTE_DIR="${_remote_dir}"
 readonly SKIP_TESTS="${NOMON_SKIP_TESTS:-false}"
 
 # ── Resolve target version (pre-flight, before we touch anything) ─────────────

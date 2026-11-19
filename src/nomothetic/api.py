@@ -45,6 +45,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from nomothetic.mode import Mode, get_mode
+from nomothetic.paths import media_dir
 
 # Device-mode imports (conditionally used)
 try:
@@ -1069,7 +1070,7 @@ def _parse_int_env(name: str, default: int, lo: int = 0, hi: int = 100) -> int:
 _default_volume_pct: int = _parse_int_env("NOMON_AUDIO_VOLUME", 80)
 _default_mic_gain_pct: int = _parse_int_env("NOMON_AUDIO_MIC_GAIN", 80)
 _audio_player: AudioPlayer | None = None
-_media_dir: Path = Path("~/perceptua-nomon/media").expanduser()
+_media_dir: Path = media_dir()
 
 
 # ============================================================================
@@ -1149,8 +1150,8 @@ async def lifespan(app: FastAPI):
     """Manage camera, HAT client, and audio initialization and cleanup."""
     global _camera, _hat_client, _audio_recorder, _audio_player, _media_dir
     global _stream_host, _stream_port
-    # Resolve media directory from environment (set by start.sh from config.toml)
-    _media_dir = Path(os.environ.get("NOMON_MEDIA_DIR", "~/perceptua-nomon/media")).expanduser()
+    # Resolve media directory from environment (NOMON_MEDIA_DIR, else $NOMON_HOME/media)
+    _media_dir = media_dir()
     # Resolve stream defaults from environment (set by start.sh from [stream] config)
     _stream_host = os.environ.get("NOM_STREAM_HOST", "127.0.0.1")
     _stream_port = int(os.environ.get("NOM_STREAM_PORT", "8000"))
