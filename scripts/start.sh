@@ -225,7 +225,7 @@ LOG_FILE="${NOM_LOG_DIR}/${SERVER_TYPE}.log"
 
 # ─── Resolve NOMON_HOME and NOMON_MEDIA_DIR (with ~ expansion) ───────────────
 # Precedence for media: config.toml [media].dir > NOMON_MEDIA_DIR > $NOMON_HOME/media.
-NOMON_HOME="${NOMON_HOME:-~/perceptua-nomon}"
+NOMON_HOME="${NOMON_HOME:-~/sylvan-mechatronics}"
 NOMON_MEDIA_DIR="${NOMON_MEDIA_DIR:-${NOMON_HOME}/media}"
 NOMON_HOME="${NOMON_HOME/#\~/$HOME}"
 NOMON_MEDIA_DIR="${NOMON_MEDIA_DIR/#\~/$HOME}"

@@ -314,7 +314,7 @@ root folder — set it in each repo's `.env.device` / `.env.local` if yours
 differs from the default:
 
 ```bash
-NOMON_HOME=~/perceptua-nomon
+NOMON_HOME=~/sylvan-mechatronics
 
 cd "$NOMON_HOME/nomographic"
 make deploy-local
@@ -353,7 +353,7 @@ redeploying swaps it in one step. The manual equivalent, for standalone use:
 ```bash
 sudo apt install -y ffmpeg unzip
 
-cd "${NOMON_HOME:-$HOME/perceptua-nomon}/nomothetic"
+cd "${NOMON_HOME:-$HOME/sylvan-mechatronics}/nomothetic"
 make fetch-stt-model          # fetches the model NOMON_STT_MODEL_PATH names
                               # (default: small English, ~40 MB)
 sudo systemctl restart nomothetic-api
