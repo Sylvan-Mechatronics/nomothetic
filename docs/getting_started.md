@@ -72,7 +72,7 @@ Key settings in `config.toml`:
 | `[api]` | `port` | `8443` | HTTPS port |
 | `[api]` | `use_ssl` | `true` | Auto-generates self-signed cert in `.certs/` |
 | `[hat]` | `socket_path` | `/run/nomopractic/nomopractic.sock` | IPC socket |
-| `[media]` | `dir` | `~/perceptua-nomon/media` | Base media directory for video and audio |
+| `[media]` | `dir` | `$NOMON_MEDIA_DIR`, else `$NOMON_HOME/media` (`NOMON_HOME` defaults to `~/perceptua-nomon`) | Base media directory for video and audio |
 | `[audio]` | `input_device_index` | unset | Explicit PortAudio mic index (unset = auto-detect by name) |
 | `[mqtt]` | `broker` | `""` | MQTT broker address (leave empty to disable telemetry) |
 | `[telemetry]` | `device_id` | `""` | Fleet node ID (auto-detected if empty) |

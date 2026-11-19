@@ -309,19 +309,23 @@ For nomothetic:
 
 ## 5 - Deploy Services
 
-From each repo root on the Pi (recommended order):
+From each repo root on the Pi (recommended order). `NOMON_HOME` is the nomon
+root folder — set it in each repo's `.env.device` / `.env.local` if yours
+differs from the default:
 
 ```bash
-cd ~/perceptua-nomon/nomographic
+NOMON_HOME=~/perceptua-nomon
+
+cd "$NOMON_HOME/nomographic"
 make deploy-local
 
-cd ~/perceptua-nomon/nomopractic
+cd "$NOMON_HOME/nomopractic"
 make deploy-local
 
-cd ~/perceptua-nomon/nomothetic
+cd "$NOMON_HOME/nomothetic"
 make deploy-local
 
-cd ~/perceptua-nomon/autonomon
+cd "$NOMON_HOME/autonomon"
 make deploy-local
 ```
 
@@ -349,7 +353,7 @@ redeploying swaps it in one step. The manual equivalent, for standalone use:
 ```bash
 sudo apt install -y ffmpeg unzip
 
-cd ~/perceptua-nomon/nomothetic
+cd "${NOMON_HOME:-$HOME/perceptua-nomon}/nomothetic"
 make fetch-stt-model          # fetches the model NOMON_STT_MODEL_PATH names
                               # (default: small English, ~40 MB)
 sudo systemctl restart nomothetic-api
