@@ -2,7 +2,7 @@
 
 ``NOMON_HOME`` is the folder on the device that holds the nomon checkouts
 (``nomothetic/``, ``autonomon/``, ``nomographic/``) and the ``media/`` tree.
-It defaults to ``~/perceptua-nomon``; the deploy scripts in each repo read the
+It defaults to ``~/sylvan-mechatronics``; the deploy scripts in each repo read the
 same variable from ``.env.device`` so the runtime and the deploy target agree.
 """
 
@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 #: Fallback for ``NOMON_HOME`` when the variable is unset or empty.
-DEFAULT_NOMON_HOME: str = "~/perceptua-nomon"
+DEFAULT_NOMON_HOME: str = "~/sylvan-mechatronics"
 
 
 def nomon_home() -> Path:

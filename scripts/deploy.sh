@@ -37,7 +37,7 @@
 #                     use the ssh-agent / default identity.)
 #   NOMON_SUDO_PASS   Optional sudo password for non-interactive remote sudo
 #                     operations. Leave unset to use interactive sudo prompts.
-#   NOMON_HOME        nomon root folder on the Pi (default ~/perceptua-nomon).
+#   NOMON_HOME        nomon root folder on the Pi (default ~/sylvan-mechatronics).
 #                     Also copied to the device env, where it sets the media dir.
 #   NOMON_REMOTE_DIR  Absolute path to the repo directory on the Pi. Optional;
 #                     defaults to ${NOMON_HOME}/nomothetic.
@@ -172,7 +172,7 @@ fi
 # NOMON_REMOTE_DIR, else <NOMON_HOME>/nomothetic. Kept as a literal "~/..." here
 # so it resolves against the Pi user's home, not the dev machine's.
 
-NOMON_HOME="${NOMON_HOME:-~/perceptua-nomon}"
+NOMON_HOME="${NOMON_HOME:-~/sylvan-mechatronics}"
 DEPLOY_REMOTE_DIR="${NOMON_REMOTE_DIR:-${NOMON_HOME%/}/nomothetic}"
 
 # ── SSH helpers ────────────────────────────────────────────────────────────────
@@ -339,7 +339,7 @@ fi
 
 readonly REQUESTED_VERSION="${NOMON_DEPLOY_VERSION:-}"
 readonly DEPLOY_LOCAL="${NOMON_DEPLOY_LOCAL:-false}"
-_remote_dir="${NOMON_DEPLOY_REMOTE_DIR:-~/perceptua-nomon/nomothetic}"
+_remote_dir="${NOMON_DEPLOY_REMOTE_DIR:-~/sylvan-mechatronics/nomothetic}"
 [[ "${_remote_dir}" == "~/"* ]] && _remote_dir="${HOME}/${_remote_dir#\~/}"
 readonly REMOTE_DIR="${_remote_dir}"
 readonly SKIP_TESTS="${NOMON_SKIP_TESTS:-false}"
